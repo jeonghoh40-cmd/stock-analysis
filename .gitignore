@@ -12,6 +12,11 @@ kakao_config.json
 analysis_*.json
 stock_data_*.csv
 dart_financial_*.csv
+report.txt
+analysis.log
+
+# 구버전 파일
+stock_analysis.py
 
 # Python 캐시
 __pycache__/

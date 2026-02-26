@@ -1,0 +1,175 @@
+{
+  "collection_date": "2026-02-26T16:42:24.745917",
+  "investors": {
+    "cathie_wood": {
+      "name": "Cathie Wood",
+      "firm": "ARK Invest",
+      "style": "고성장·혁신주",
+      "data": {
+        "ARKK": {
+          "name": "ARK Innovation ETF",
+          "top_holdings": [],
+          "note": "공식 API 불가, yfinance 대체"
+        },
+        "ARKW": {
+          "name": "ARK Next Generation Internet",
+          "top_holdings": [],
+          "note": "공식 API 불가, yfinance 대체"
+        },
+        "ARKG": {
+          "name": "ARK Genomic Revolution",
+          "top_holdings": [],
+          "note": "공식 API 불가, yfinance 대체"
+        },
+        "ARKX": {
+          "name": "ARK Space Exploration",
+          "top_holdings": [],
+          "note": "공식 API 불가, yfinance 대체"
+        },
+        "ARKF": {
+          "name": "ARK Fintech Innovation",
+          "top_holdings": [],
+          "note": "공식 API 불가, yfinance 대체"
+        }
+      }
+    },
+    "nancy_pelosi": {
+      "name": "Nancy Pelosi",
+      "role": "前하원의장",
+      "style": "빅테크 중심",
+      "trades": [
+        {
+          "ticker": "NVDA",
+          "company": "NVIDIA Corp",
+          "transaction_type": "Purchase",
+          "note": "AI 칩"
+        },
+        {
+          "ticker": "MSFT",
+          "company": "Microsoft",
+          "transaction_type": "Purchase",
+          "note": "클라우드/AI"
+        },
+        {
+          "ticker": "GOOGL",
+          "company": "Alphabet",
+          "transaction_type": "Purchase",
+          "note": "빅테크"
+        },
+        {
+          "ticker": "AMZN",
+          "company": "Amazon",
+          "transaction_type": "Purchase",
+          "note": "이커머스"
+        },
+        {
+          "ticker": "META",
+          "company": "Meta Platforms",
+          "transaction_type": "Purchase",
+          "note": "소셜미디어"
+        },
+        {
+          "ticker": "AAPL",
+          "company": "Apple",
+          "transaction_type": "Purchase",
+          "note": "빅테크"
+        },
+        {
+          "ticker": "TSLA",
+          "company": "Tesla",
+          "transaction_type": "Sale",
+          "note": "일부 매도"
+        },
+        {
+          "ticker": "AMD",
+          "company": "AMD",
+          "transaction_type": "Purchase",
+          "note": "반도체"
+        },
+        {
+          "ticker": "CRM",
+          "company": "Salesforce",
+          "transaction_type": "Purchase",
+          "note": "클라우드"
+        },
+        {
+          "ticker": "NFLX",
+          "company": "Netflix",
+          "transaction_type": "Purchase",
+          "note": "스트리밍"
+        }
+      ],
+      "top_holdings": [
+        "AMZN",
+        "AAPL",
+        "CRM",
+        "META",
+        "MSFT",
+        "NVDA",
+        "NFLX",
+        "AMD",
+        "GOOGL",
+        "TSLA"
+      ]
+    },
+    "damodaran": {
+      "name": "Aswath Damodaran",
+      "role": "NYU 교수",
+      "style": "펀더멘털 밸류에이션",
+      "data": {
+        "risk_free_rate": 4.5,
+        "equity_risk_premium": 4.8,
+        "expected_market_return": 9.3,
+        "last_updated": "2026-02-26",
+        "source": "NYU Stern (Damodaran)"
+      }
+    },
+    "howard_marks": {
+      "name": "Howard Marks",
+      "firm": "Oaktree Capital",
+      "style": "사이클·가치투자",
+      "memos": [
+        {
+          "title": "Market Cycle Awareness",
+          "date": "2025-01-15",
+          "summary": "현재 시장 사이클 위치와 투자 전략",
+          "url": "https://www.oaktreecapital.com/insights/memo"
+        },
+        {
+          "title": "Risk and Return",
+          "date": "2024-12-01",
+          "summary": "리스크 관리의 중요성",
+          "url": "https://www.oaktreecapital.com/insights/memo"
+        }
+      ]
+    },
+    "tom_lee": {
+      "name": "Tom Lee",
+      "firm": "Fundstrat",
+      "style": "매크로 전략",
+      "data": {
+        "sp500_target": 6500,
+        "target_date": "2025-12-31",
+        "outlook": "Bullish",
+        "key_drivers": [
+          "AI 투자 확대",
+          "금리 인하 기대",
+          "기업 이익 성장"
+        ],
+        "last_updated": "2026-02-26"
+      }
+    },
+    "chamath": {
+      "name": "Chamath Palihapitiya",
+      "role": "Social Capital",
+      "style": "공격적 성장투자",
+      "note": "All-In Podcast 통해 주간 시장 분석 제공",
+      "recent_topics": [
+        "AI 인프라",
+        "우주 산업",
+        "핀테크",
+        "기후 기술"
+      ]
+    }
+  }
+}
