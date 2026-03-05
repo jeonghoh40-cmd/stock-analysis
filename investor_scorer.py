@@ -1,16 +1,95 @@
 """
 투자자 스코어링 모듈
-- Nancy Pelosi 포트폴리오 참조
-- ARK Invest (Cathie Wood) 보유 종목
-- 한국 유명 투자자 (박세익, 존리, 이채원, 김민국, 강방천)
-- 유명 투자자 철학 기반 가중치
+────────────────────────────────────────────────────────────────
+데이터 소스:
+  ① Pelosi 의원   : House Stock Watcher API (라이브) + 정적 fallback
+  ② ARK Invest    : arkfunds.io API (라이브) + 정적 fallback
+  ③ 국내 유명투자자: 박세익·존리·이채원·김민국·강방천 (정적 큐레이션)
+
+캐시: investor_live_cache.json (24시간 유효)
 """
 
 import os
 import sys
+import json
+import datetime
+
+import requests
 
 if sys.stdout.encoding != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
+BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
+_CACHE_F   = os.path.join(BASE_DIR, "investor_live_cache.json")
+_CACHE_TTL = 24   # hours
+
+# ─── 캐시 I/O ──────────────────────────────────────────────────
+def _load_live_cache() -> dict:
+    try:
+        if os.path.exists(_CACHE_F):
+            with open(_CACHE_F, encoding="utf-8") as f:
+                d = json.load(f)
+            saved = datetime.datetime.fromisoformat(d.get("saved_at", "2000-01-01T00:00:00"))
+            if (datetime.datetime.now() - saved).total_seconds() < _CACHE_TTL * 3600:
+                return d
+    except Exception:
+        pass
+    return {}
+
+def _save_live_cache(data: dict):
+    data["saved_at"] = datetime.datetime.now().isoformat(timespec="seconds")
+    with open(_CACHE_F, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+# ─── 라이브 API 수집 ───────────────────────────────────────────
+def _fetch_live_pelosi() -> set:
+    url = ("https://house-stock-watcher-data.s3-us-west-2.amazonaws.com"
+           "/data/all_transactions.json")
+    resp = requests.get(url, timeout=25)
+    resp.raise_for_status()
+    tickers: set = set()
+    for t in resp.json():
+        if "Pelosi" not in t.get("representative", ""):
+            continue
+        if t.get("type", "").lower() not in ("purchase", "buy", "exchange"):
+            continue
+        tk = t.get("ticker", "").strip().upper()
+        if tk and 1 <= len(tk) <= 5 and tk.isalpha():
+            tickers.add(tk)
+    return tickers
+
+def _fetch_live_ark() -> dict:
+    funds, combined = ["ARKK", "ARKW", "ARKG", "ARKF", "ARKQ"], {}
+    for fund in funds:
+        try:
+            resp = requests.get(
+                f"https://arkfunds.io/api/v2/fund/holdings?symbol={fund}", timeout=15)
+            for h in resp.json().get("holdings", []):
+                tk = h.get("ticker", "").upper().strip()
+                w  = float(h.get("weight", 0))
+                if tk:
+                    combined[tk] = round(combined.get(tk, 0.0) + w, 4)
+        except Exception:
+            pass
+    return combined
+
+def refresh_live_data() -> dict:
+    """라이브 API 강제 갱신 (수동 호출 가능)"""
+    result: dict = {}
+    try:
+        pelosi = list(_fetch_live_pelosi())
+        result["pelosi_live"] = pelosi
+        print(f"  [investor] Pelosi 라이브 픽 {len(pelosi)}개")
+    except Exception as e:
+        print(f"  [investor] Pelosi API 실패 (정적 데이터 사용): {e}")
+    try:
+        ark = _fetch_live_ark()
+        result["ark_live"] = ark
+        print(f"  [investor] ARK 라이브 {len(ark)}개")
+    except Exception as e:
+        print(f"  [investor] ARK API 실패 (정적 데이터 사용): {e}")
+    _save_live_cache(result)
+    return result
 
 # ──────────────────────────────────────────────
 # Nancy Pelosi 주요 보유 종목 (2024-2025 기준)
@@ -158,68 +237,83 @@ TOM_LEE_OUTLOOK = {
 def get_investor_score(ticker: str) -> dict:
     """
     종목의 투자자 스코어를 계산합니다.
-    - 미국 주식: Pelosi, ARK
-    - 한국 주식: 박세익, 존리, 이채원, 김민국, 강방천
-    
+    - 미국 주식: Pelosi(라이브 우선), ARK(라이브 우선)
+    - 한국 주식: 박세익·존리·이채원·김민국·강방천 (정적 큐레이션)
+
     Args:
-        ticker: 종목 티커 (예: 'NVDA', 'AAPL', '005930')
-    
-    Returns:
-        dict: {
-            'pelosi_score': int (0-15),
-            'ark_score': int (0-15),
-            'korean_investor_score': int (0-25),
-            'total_score': int,
-            'investor_notes': list
-        }
+        ticker: 종목 티커 (예: 'NVDA', '005930', '005930.KS')
     """
-    ticker_upper = ticker.upper()
-    
-    pelosi_score = 0
-    ark_score = 0
-    korean_score = 0
+    # 한국 종목 suffix 제거
+    clean = ticker.upper().replace(".KS", "").replace(".KQ", "")
+
+    # 라이브 캐시 로드 (없으면 갱신 시도, 실패 시 정적 사용)
+    live = _load_live_cache()
+
+    # ── Pelosi ──────────────────────────────────────────────────
+    pelosi_score   = 0
     investor_notes = []
-    
-    # Pelosi 포트폴리오 확인
-    if ticker_upper in PELOSI_PORTFOLIO:
-        weight = PELOSI_PORTFOLIO[ticker_upper]['weight']
-        pelosi_score = min(15, weight // 7 + 1)
-        investor_notes.append(f"Pelosi: {PELOSI_PORTFOLIO[ticker_upper]['note']}")
-    
-    # ARK 보유 종목 확인
-    if ticker_upper in ARK_TOP_HOLDINGS:
-        weight = ARK_TOP_HOLDINGS[ticker_upper]['weight']
-        ark_score = min(15, weight // 7 + 1)
-        investor_notes.append(f"ARK: {ARK_TOP_HOLDINGS[ticker_upper]['note']}")
-    
-    # 한국 투자자 포트폴리오 확인
+
+    live_pelosi = live.get("pelosi_live", [])
+    if live_pelosi:
+        is_pelosi = clean in live_pelosi
+    else:
+        is_pelosi = clean in PELOSI_PORTFOLIO
+
+    if is_pelosi:
+        if live_pelosi:
+            pelosi_score = 15           # 라이브 API: 의회 공시 실제 매수 = 최고 점수
+        else:
+            w = PELOSI_PORTFOLIO.get(clean, {}).get("weight", 0)
+            pelosi_score = min(15, w // 7 + 1)
+        investor_notes.append(
+            f"Pelosi 매수: {PELOSI_PORTFOLIO.get(clean, {}).get('note', clean)}"
+        )
+
+    # ── ARK ─────────────────────────────────────────────────────
+    live_ark = live.get("ark_live", {})
+    if live_ark:
+        is_ark  = clean in live_ark
+        ark_w   = live_ark.get(clean, 0.0)
+    else:
+        is_ark  = clean in ARK_TOP_HOLDINGS
+        ark_w   = ARK_TOP_HOLDINGS.get(clean, {}).get("weight", 0) / 100.0  # 정규화
+
+    if   ark_w >= 1.0: ark_score = 15
+    elif ark_w >= 0.5: ark_score = 10
+    elif is_ark:       ark_score = 5
+    else:              ark_score = 0
+
+    if is_ark:
+        investor_notes.append(
+            f"ARK {ark_w:.1f}%: {ARK_TOP_HOLDINGS.get(clean, {}).get('note', clean)}"
+        )
+
+    # ── 국내 유명 투자자 ─────────────────────────────────────────
     korean_investors = [
         ('박세익', PARK_SEOIK_PORTFOLIO),
-        ('존리', JOHN_LEE_PORTFOLIO),
+        ('존리',   JOHN_LEE_PORTFOLIO),
         ('이채원', LEE_CHAEWON_PORTFOLIO),
         ('김민국', KIM_MINGUK_PORTFOLIO),
         ('강방천', KANG_BANGCHEON_PORTFOLIO),
     ]
-    
-    for investor_name, portfolio in korean_investors:
-        if ticker_upper in portfolio:
-            weight = portfolio[ticker_upper]['weight']
-            score = min(5, weight // 5 + 1)  # 각 투자자당 최대 5 점
-            korean_score += score
-            investor_notes.append(f"{investor_name}: {portfolio[ticker_upper]['note']}")
-    
-    # 한국 투자자 점수 최대 25 점 제한
+    korean_score = 0
+    for inv_name, portfolio in korean_investors:
+        if clean in portfolio:
+            w = portfolio[clean].get("weight", 0)
+            korean_score += min(5, w // 5 + 1)
+            investor_notes.append(f"{inv_name}: {portfolio[clean]['note']}")
     korean_score = min(25, korean_score)
-    
+
     return {
-        'pelosi_score': pelosi_score,
-        'ark_score': ark_score,
+        'is_pelosi_pick':        is_pelosi,
+        'pelosi_score':          pelosi_score,
+        'is_ark_pick':           is_ark,
+        'ark_score':             ark_score,
+        'ark_weight':            round(ark_w, 4),
         'korean_investor_score': korean_score,
-        'total_score': pelosi_score + ark_score + korean_score,
-        'investor_notes': investor_notes,
-        'is_pelosi_pick': pelosi_score > 0,
-        'is_ark_pick': ark_score > 0,
         'is_korean_investor_pick': korean_score > 0,
+        'total_score':           pelosi_score + ark_score + korean_score,
+        'investor_notes':        investor_notes,
     }
 
 

@@ -27,7 +27,9 @@ from typing import Optional
 import yfinance as yf
 import pandas as pd
 import feedparser
+import glob
 from dotenv import dotenv_values
+from universe import UNIVERSE
 
 if sys.stdout.encoding != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -39,8 +41,10 @@ _cfg = dotenv_values(_env_path)
 def _get(key: str, default: str = "") -> str:
     return os.environ.get(key) or _cfg.get(key) or default
 
-BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
-REPORT_PATH = os.path.join(BASE_DIR, "report.txt")
+BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
+REPORT_PATH  = os.path.join(BASE_DIR, "report.txt")          # 최신본 (이메일용)
+REPORTS_DIR  = os.path.join(BASE_DIR, "reports")             # 히스토리 디렉토리
+os.makedirs(REPORTS_DIR, exist_ok=True)
 
 # ── 알림 설정 ─────────────────────────────────────────────────
 SMTP_SERVER = _get("SMTP_SERVER", "smtp.gmail.com")
@@ -54,86 +58,6 @@ KAKAO_TOKEN = _get("KAKAO_TOKEN")
 
 # ═══════════════════════════════════════════════════════════════
 # 스크리닝 유니버스  (국내 50 + 미국 60 + 중국 40)
-# ═══════════════════════════════════════════════════════════════
-UNIVERSE = {
-    "🇰🇷 국내": {
-        "삼성전자":          "005930.KS",  "SK하이닉스":      "000660.KS",
-        "LG에너지솔루션":    "373220.KS",  "삼성바이오로직스":"207940.KS",
-        "현대차":            "005380.KS",  "기아":            "000270.KS",
-        "NAVER":             "035420.KS",  "카카오":          "035720.KS",
-        "셀트리온":          "068270.KS",  "POSCO홀딩스":     "005490.KS",
-        "삼성SDI":           "006400.KS",  "LG화학":          "051910.KS",
-        "한화에어로스페이스":"012450.KS",  "크래프톤":        "259960.KS",
-        "SK이노베이션":      "096770.KS",  "현대모비스":      "012330.KS",
-        "KB금융":            "105560.KS",  "신한지주":        "055550.KS",
-        "하나금융지주":      "086790.KS",  "삼성물산":        "028260.KS",
-        "LG전자":            "066570.KS",  "SK텔레콤":        "017670.KS",
-        "KT":                "030200.KS",  "두산에너빌리티":  "034020.KS",
-        "카카오뱅크":        "323410.KS",  "카카오페이":      "377300.KS",
-        "HMM":               "011200.KS",  "고려아연":        "010130.KS",
-        "LG이노텍":          "011070.KS",  "삼성전기":        "009150.KS",
-        "에코프로비엠":      "247540.KQ",  "에코프로":        "086520.KQ",
-        "포스코퓨처엠":      "003670.KS",  "엔씨소프트":      "036570.KS",
-        "넷마블":            "251270.KS",  "펄어비스":        "263750.KQ",
-        "현대건설":          "000720.KS",  "한국전력":        "015760.KS",
-        "삼성생명":          "032830.KS",  "삼성화재":        "000810.KS",
-        "아모레퍼시픽":      "090430.KS",  "LG생활건강":      "051900.KS",
-        "CJ제일제당":        "097950.KS",  "오리온":          "271560.KS",
-        "대한항공":          "003490.KS",  "현대글로비스":    "086280.KS",
-        "GS":                "078930.KS",  "SK":              "034730.KS",
-        "한국조선해양":      "009540.KS",  "한미반도체":      "042700.KS",
-    },
-    "🇺🇸 미국": {
-        "Apple":             "AAPL",  "NVIDIA":          "NVDA",
-        "Microsoft":         "MSFT",  "Alphabet":        "GOOGL",
-        "Amazon":            "AMZN",  "Meta":            "META",
-        "Tesla":             "TSLA",  "Broadcom":        "AVGO",
-        "AMD":               "AMD",   "TSMC ADR":        "TSM",
-        "Netflix":           "NFLX",  "Salesforce":      "CRM",
-        "Oracle":            "ORCL",  "Adobe":           "ADBE",
-        "Qualcomm":          "QCOM",  "Intel":           "INTC",
-        "Texas Instruments": "TXN",   "Micron":          "MU",
-        "Applied Materials": "AMAT",  "Lam Research":    "LRCX",
-        "KLA Corp":          "KLAC",  "Palo Alto":       "PANW",
-        "CrowdStrike":       "CRWD",  "Snowflake":       "SNOW",
-        "Palantir":          "PLTR",  "Datadog":         "DDOG",
-        "ServiceNow":        "NOW",   "Workday":         "WDAY",
-        "Uber":              "UBER",  "Airbnb":          "ABNB",
-        "Booking":           "BKNG",  "Shopify":         "SHOP",
-        "PayPal":            "PYPL",  "Coinbase":        "COIN",
-        "Visa":              "V",     "Mastercard":      "MA",
-        "JPMorgan":          "JPM",   "Goldman Sachs":   "GS",
-        "Morgan Stanley":    "MS",    "Berkshire B":     "BRK-B",
-        "Johnson&Johnson":   "JNJ",   "Pfizer":          "PFE",
-        "Eli Lilly":         "LLY",   "UnitedHealth":    "UNH",
-        "Novo Nordisk":      "NVO",   "Moderna":         "MRNA",
-        "Exxon Mobil":       "XOM",   "Chevron":         "CVX",
-        "NextEra Energy":    "NEE",   "Rivian":          "RIVN",
-        "Boeing":            "BA",    "Lockheed Martin": "LMT",
-        "Caterpillar":       "CAT",   "Deere":           "DE",
-        "Walmart":           "WMT",   "Costco":          "COST",
-        "Nike":              "NKE",   "Starbucks":       "SBUX",
-        "Walt Disney":       "DIS",   "McDonald's":      "MCD",
-    },
-    "🇨🇳 중국": {
-        "알리바바":    "BABA",  "징둥닷컴":  "JD",    "바이두":      "BIDU",
-        "핀둬둬":      "PDD",   "넷이즈":    "NTES",  "비리비리":    "BILI",
-        "샤오펑":      "XPEV",  "니오":      "NIO",   "리오토":      "LI",
-        "ZTO Express": "ZTO",   "Trip.com":  "TCOM",  "Vipshop":     "VIPS",
-        "Ke Holdings": "BEKE",  "iQIYI":     "IQ",    "Weibo":       "WB",
-        "360 Finance": "QFIN",  "Lufax":     "LU",    "Full Truck":  "YMM",
-        "Kanzhun":     "BZ",    "New Orient":"EDU",   "TAL Education":"TAL",
-        "Daqo Energy": "DQ",    "JinkoSolar":"JKS",   "ACM Research":"ACMR",
-        "Himax Tech":  "HIMX",  "Agora":     "API",   "OneConnect":  "OCFT",
-        "Kingsoft Cloud":"KC",  "iSoftStone":"ISS",   "Tuya Smart":  "TUYA",
-        "Liqtech Intl":"LIQT",  "Moxian":    "MOXC",  "UTStarcom":   "UTSI",
-        "GreenPower":  "GP",    "Sohu.com":  "SOHU",  "Remark Hdgs": "MARK",
-        "Ebang Intl":  "EBON",  "Nano-X":    "NNOX",  "CIFS Capital":"CIFS",
-        "ChinaNet":    "CNET",
-    },
-}
-
-
 # ═══════════════════════════════════════════════════════════════
 # 기술적 지표 계산
 # ═══════════════════════════════════════════════════════════════
@@ -168,8 +92,41 @@ def _bb(close: pd.Series):
     pct = (cur - dn) / (up - dn) * 100 if (up - dn) > 0 else 50.0
     return round(up, 2), round(dn, 2), round(pct, 1)
 
-def score_stock(rsi, macd_hist, price, ma5, ma20, ma60, mom5) -> int:
-    """기술적 종합 점수 –100 ~ +100"""
+def _atr(df: pd.DataFrame, n: int = 14) -> float:
+    """
+    Average True Range (14일) — 변동성 기반 손절가·목표가 산출 기준
+      True Range = max(High-Low, |High-PrevClose|, |Low-PrevClose|)
+      손절가    = 진입가 - 2 × ATR   (2ATR 룰)
+      목표가    = 진입가 + 3 × ATR   (Risk:Reward ≈ 1 : 1.5)
+    """
+    try:
+        high  = df["High"].squeeze()
+        low   = df["Low"].squeeze()
+        close = df["Close"].squeeze()
+        prev  = close.shift(1)
+        tr = pd.concat([
+            high - low,
+            (high - prev).abs(),
+            (low  - prev).abs(),
+        ], axis=1).max(axis=1)
+        return float(tr.rolling(n).mean().iloc[-1])
+    except Exception:
+        return 0.0
+
+def score_stock(rsi, macd_hist, price, ma5, ma20, ma60, mom5,
+                bb_pct: float = 50.0, vol_ratio: float = 1.0,
+                chg: float = 0.0) -> int:
+    """기술적 종합 점수 –100 ~ +100
+
+    지표별 배점:
+      RSI(14)        : ±40
+      MACD hist      : ±20
+      이동평균 정배열 : ±15
+      MA5 vs MA20    : ±10
+      5일 모멘텀     : ±10
+      볼린저밴드 위치 : ±15  ← 신규
+      거래량 방향성  : ±10  ← 신규
+    """
     s = 0
     # RSI (±40)
     if   rsi < 20: s += 40
@@ -180,43 +137,66 @@ def score_stock(rsi, macd_hist, price, ma5, ma20, ma60, mom5) -> int:
     elif rsi > 60: s -= 10
     # MACD (±20)
     s += 20 if macd_hist > 0 else -20
-    # 이동평균 정배열 (±20)
+    # 이동평균 정배열 (±15)
     if price > ma20 > ma60:   s += 15
     elif price > ma20:        s += 7
     elif price < ma20 < ma60: s -= 15
     elif price < ma20:        s -= 7
     # MA5 vs MA20 (±10)
     s += 10 if ma5 > ma20 else -10
-    # 모멘텀 (±10)
+    # 5일 모멘텀 (±10)
     if   mom5 >  5: s += 10
     elif mom5 >  2: s += 5
     elif mom5 < -5: s -= 10
     elif mom5 < -2: s -= 5
+    # ── 볼린저밴드 위치 (±15) ─────────────────────────
+    # bb_pct=0 : 하단(과매도) → 매수 신호
+    # bb_pct=100: 상단(과매수) → 매도 신호
+    if   bb_pct < 10: s += 15
+    elif bb_pct < 20: s += 8
+    elif bb_pct > 90: s -= 15
+    elif bb_pct > 80: s -= 8
+    # ── 거래량 방향성 (±10) ──────────────────────────
+    # 거래량 급증 + 가격 상승 = 강한 매수 신호
+    # 거래량 급증 + 가격 하락 = 강한 매도 신호
+    if   vol_ratio > 2.0 and chg > 0: s += 10
+    elif vol_ratio > 2.0 and chg < 0: s -= 10
+    elif vol_ratio > 1.5 and chg > 0: s += 5
+    elif vol_ratio > 1.5 and chg < 0: s -= 5
     return max(-100, min(100, s))
 
 
-def score_with_investor_weight(ticker: str, base_score: int) -> int:
+def score_with_investor_weight(ticker: str, base_score: int) -> tuple:
     """
-    유명 투자자 포트폴리오 가중치를 적용한 점수 보정
-    - Pelosi 보유 종목: +5 ~ +10
-    - ARK 보유 종목: +3 ~ +8
-    - 둘 다 해당: 추가 +5
+    유명 투자자 포트폴리오 가중치를 적용한 점수 보정.
+
+    반환: (조정된_점수, 투자자_보너스, 노트_리스트)
+
+    점수 기준:
+      Pelosi 의회 매수 공시  : +15
+      ARK 비중 ≥1%          : +15  / 0.5% : +10  / 보유 : +5
+      Pelosi + ARK 동시 보유 : +5 추가
+      국내 유명투자자 픽      : 최대 +15 (박세익·존리·이채원·김민국·강방천)
     """
     try:
         from investor_scorer import get_investor_score
-        inv_score = get_investor_score(ticker.upper())
-        
+        inv = get_investor_score(ticker)   # .KS/.KQ 처리는 investor_scorer 내부에서
+
         bonus = 0
-        if inv_score['is_pelosi_pick']:
-            bonus += inv_score['pelosi_score']  # 최대 15
-        if inv_score['is_ark_pick']:
-            bonus += inv_score['ark_score']  # 최대 15
-        if inv_score['is_pelosi_pick'] and inv_score['is_ark_pick']:
-            bonus += 5  # 둘 다 해당 시 추가 보너스
-        
-        return max(-100, min(100, base_score + bonus))
+        if inv['is_pelosi_pick']:
+            bonus += inv['pelosi_score']
+        if inv['is_ark_pick']:
+            bonus += inv['ark_score']
+        if inv['is_pelosi_pick'] and inv['is_ark_pick']:
+            bonus += 5
+        # 국내 유명 투자자 픽 (최대 +15)
+        kr_bonus = min(15, inv.get('korean_investor_score', 0))
+        bonus += kr_bonus
+
+        new_score = max(-100, min(100, base_score + bonus))
+        return new_score, bonus, inv.get('investor_notes', [])
     except Exception:
-        return base_score
+        return base_score, 0, []
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -238,12 +218,25 @@ def screen_one(group: str, name: str, ticker: str) -> Optional[dict]:
         ma5, ma20, ma60   = _mas(close)
         mom5              = _mom(close, 5)
         bb_up, bb_dn, bb_pct = _bb(close)
-        score             = score_stock(rsi, macd_hist, price, ma5, ma20, ma60, mom5)
 
         vol = df["Volume"].squeeze() if "Volume" in df.columns else pd.Series([0]*len(df))
         vol_avg = float(vol.rolling(20).mean().iloc[-1])
         vol_cur = float(vol.iloc[-1])
         vol_ratio = round(vol_cur / (vol_avg + 1e-9), 2)
+
+        # BB + 거래량 방향성을 포함한 기술적 종합 점수
+        base_score = score_stock(
+            rsi, macd_hist, price, ma5, ma20, ma60, mom5,
+            bb_pct=bb_pct, vol_ratio=vol_ratio, chg=chg
+        )
+
+        # 유명 투자자 포트폴리오 가중치 적용 (Pelosi·ARK·국내 5인)
+        score, inv_bonus, inv_notes = score_with_investor_weight(ticker, base_score)
+
+        # ATR 기반 손절가·목표가 (2ATR 손절 / 3ATR 목표 → R:R ≈ 1:1.5)
+        atr          = _atr(df)
+        stop_loss    = round(price - 2 * atr, 2) if atr else None
+        target_price = round(price + 3 * atr, 2) if atr else None
 
         return {
             "group": group, "name": name, "ticker": ticker,
@@ -253,6 +246,11 @@ def screen_one(group: str, name: str, ticker: str) -> Optional[dict]:
             "bb_up": bb_up, "bb_dn": bb_dn, "bb_pct": bb_pct,
             "mom5": round(mom5, 2), "vol_ratio": vol_ratio,
             "score": score,
+            "inv_bonus": inv_bonus,           # 투자자 보너스 점수
+            "inv_notes": inv_notes,           # 투자자 태그 리스트
+            "atr":          round(atr, 2) if atr else None,
+            "stop_loss":    stop_loss,
+            "target_price": target_price,
         }
     except Exception:
         return None
@@ -316,19 +314,35 @@ def collect_macro() -> dict:
 
 
 def collect_news() -> list:
-    headlines = []
-    for rss in [
-        "https://www.yonhapnewstv.co.kr/category/news/economy/feed/",
-        "https://rss.donga.com/economy.xml",
-    ]:
+    """
+    6개 경제 뉴스 RSS를 모두 수집한다.
+    - break 제거: 첫 성공 소스에서 멈추지 않고 전체 수집
+    - 중복 제거: 동일 제목 헤드라인 필터링
+    - 최대 20건 반환
+    """
+    rss_sources = [
+        "https://www.yonhapnewstv.co.kr/category/news/economy/feed/",  # 연합뉴스TV
+        "https://rss.donga.com/economy.xml",                            # 동아경제
+        "https://www.mk.co.kr/rss/30000001/",                          # 매일경제
+        "https://rss.mt.co.kr/mt_news.xml",                            # 머니투데이
+        "https://rss.hankyung.com/economy.xml",                        # 한국경제
+        "https://www.sedaily.com/RSS/Economy",                         # 서울경제
+    ]
+    headlines: list = []
+    seen:      set  = set()
+
+    for rss in rss_sources:
         try:
             feed = feedparser.parse(rss)
-            if feed.entries:
-                headlines = [e.title for e in feed.entries[:10]]
-                break
+            for entry in feed.entries[:5]:   # 소스당 최대 5건
+                title = entry.get("title", "").strip()
+                if title and title not in seen:
+                    seen.add(title)
+                    headlines.append(title)
         except Exception:
             continue
-    return headlines
+
+    return headlines[:20]   # 최대 20건
 
 
 def collect_overseas_snapshot() -> dict:
@@ -351,6 +365,170 @@ def collect_overseas_snapshot() -> dict:
         except Exception:
             pass
     return snap
+
+
+# ═══════════════════════════════════════════════════════════════
+# DART 재무 점수 가산 (국내주 전용)
+# ═══════════════════════════════════════════════════════════════
+def apply_dart_bonus(results: list) -> list:
+    """
+    스크리닝 결과 중 국내주(.KS/.KQ)에 DART 재무 점수를 가산한다.
+    대상: 전체 결과의 상위 40개 + 하위 40개 (매수/매도 후보 범위)
+
+    점수 기준:
+      영업이익률 > 15%  : +10
+      영업이익률 > 10%  : +5
+      영업이익률 < 0%   : -15  (적자)
+      부채비율   < 50%  : +10
+      부채비율   < 100% : +5
+      부채비율   > 200% : -10
+      유상증자·영업정지 공시 : -15
+    """
+    try:
+        from dart_collector import collect_dart_data
+    except ImportError:
+        print("  [DART] dart_collector 모듈 없음 — 건너뜀")
+        return results
+
+    dart_key = _get("DART_API_KEY")
+    if not dart_key:
+        print("  [DART] DART_API_KEY 미설정 — 건너뜀")
+        return results
+
+    # 매수·매도 후보 범위(상위·하위 40개)에서 국내주만 추출
+    candidate_range = results[:40] + results[-40:]
+    seen_tickers: set = set()
+    domestic = []
+    for r in candidate_range:
+        t = r["ticker"]
+        if t.endswith((".KS", ".KQ")) and t not in seen_tickers:
+            seen_tickers.add(t)
+            domestic.append(r)
+
+    if not domestic:
+        return results
+
+    codes = [r["ticker"].replace(".KS", "").replace(".KQ", "") for r in domestic]
+    print(f"  [DART] 국내 {len(codes)}개 종목 재무 데이터 조회 중...")
+
+    try:
+        dart_data = collect_dart_data(codes, dart_key)
+    except Exception as e:
+        print(f"  [DART] 수집 오류: {e} — 건너뜀")
+        return results
+
+    # 종목별 보너스 점수 계산
+    bonus_map: dict = {}
+    neg_keywords = ["유상증자", "영업정지", "불성실공시", "횡령", "배임"]
+
+    for r in domestic:
+        code = r["ticker"].replace(".KS", "").replace(".KQ", "")
+        fin  = dart_data.get(code, {}).get("재무제표", {})
+        important = dart_data.get(code, {}).get("중요공시", [])
+
+        bonus = 0
+        opr_margin = fin.get("영업이익률(%)")
+        debt_ratio = fin.get("부채비율(%)")
+
+        if opr_margin is not None:
+            if   opr_margin > 15: bonus += 10
+            elif opr_margin > 10: bonus += 5
+            elif opr_margin <  0: bonus -= 15   # 적자
+
+        if debt_ratio is not None:
+            if   debt_ratio <  50: bonus += 10
+            elif debt_ratio < 100: bonus += 5
+            elif debt_ratio > 200: bonus -= 10
+
+        for d in important:
+            if any(kw in d.get("제목", "") for kw in neg_keywords):
+                bonus -= 15
+                break  # 종목당 최대 1회만 페널티
+
+        bonus_map[r["ticker"]] = bonus
+
+    # 점수 반영 후 재정렬
+    adjusted = []
+    for r in results:
+        if r["ticker"] in bonus_map:
+            b = bonus_map[r["ticker"]]
+            adjusted.append({
+                **r,
+                "score":      max(-100, min(100, r["score"] + b)),
+                "dart_bonus": b,
+            })
+        else:
+            adjusted.append({**r, "dart_bonus": 0})
+
+    adjusted.sort(key=lambda x: x["score"], reverse=True)
+
+    applied = sum(1 for r in adjusted if r.get("dart_bonus", 0) != 0)
+    print(f"  [DART] ✅ {applied}개 국내 종목 재무 점수 가산 완료")
+    return adjusted
+
+
+# ═══════════════════════════════════════════════════════════════
+# 수급 점수 가산 (국내주 전용 — pykrx 외국인·기관 5일 순매수)
+# ═══════════════════════════════════════════════════════════════
+def apply_investor_flow(results: list) -> list:
+    """
+    스크리닝 결과 중 국내주(.KS/.KQ)에 수급 점수를 가산한다.
+    외국인 + 기관 5일 누적 순매수 비율 → -30 ~ +30점.
+    pykrx 미설치 또는 API 실패 시 원본 그대로 반환.
+    """
+    try:
+        from investor_flow import collect_all_flows, calc_flow_score
+    except ImportError:
+        print("  [수급] investor_flow 모듈 없음 — 건너뜀")
+        return results
+
+    # 매수·매도 후보 범위 내 국내주만 추출
+    candidate_range = results[:40] + results[-40:]
+    seen: set = set()
+    domestic = []
+    for r in candidate_range:
+        t = r["ticker"]
+        if t.endswith((".KS", ".KQ")) and t not in seen:
+            seen.add(t)
+            domestic.append(r)
+
+    if not domestic:
+        return results
+
+    codes = [r["ticker"].replace(".KS", "").replace(".KQ", "") for r in domestic]
+    print(f"  [수급] 국내 {len(codes)}개 종목 외국인·기관 순매수 조회 중...")
+
+    try:
+        flow_data = collect_all_flows(codes)
+    except Exception as e:
+        print(f"  [수급] 수집 오류: {e} — 건너뜀")
+        return results
+
+    # 종목별 수급 점수 매핑
+    flow_map: dict = {}
+    for r in domestic:
+        code = r["ticker"].replace(".KS", "").replace(".KQ", "")
+        d    = flow_data.get(code)
+        if d:
+            flow_map[r["ticker"]] = calc_flow_score(
+                d["foreign_net"], d["inst_net"], d["market_cap"]
+            )
+
+    # 점수 반영 후 재정렬
+    adjusted = []
+    for r in results:
+        fs = flow_map.get(r["ticker"], 0)
+        adjusted.append({
+            **r,
+            "score":      max(-100, min(100, r["score"] + fs)),
+            "flow_score": fs,
+        })
+
+    adjusted.sort(key=lambda x: x["score"], reverse=True)
+
+    applied = sum(1 for r in adjusted if r.get("flow_score", 0) != 0)
+    print(f"  [수급] ✅ {applied}개 국내 종목 수급 점수 가산 완료")
+    return adjusted
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -435,6 +613,39 @@ def ask_claude(buy_top: list, sell_top: list,
 
 
 # ═══════════════════════════════════════════════════════════════
+# 리포트 히스토리 관리
+# ═══════════════════════════════════════════════════════════════
+def save_report_history(report_text: str) -> str:
+    """
+    reports/ 디렉토리에 날짜별 리포트를 보관한다.
+    - 파일명: reports/report_YYYYMMDD_HHMMSS.txt
+    - 최근 30개만 유지, 오래된 파일 자동 삭제
+    - report.txt(최신본)도 동시에 갱신 (이메일 발송용)
+    반환: 저장된 히스토리 파일 경로
+    """
+    ts        = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    hist_path = os.path.join(REPORTS_DIR, f"report_{ts}.txt")
+
+    # 날짜별 히스토리 저장
+    with open(hist_path, "w", encoding="utf-8") as f:
+        f.write(report_text)
+
+    # 최신본 갱신 (report.txt)
+    with open(REPORT_PATH, "w", encoding="utf-8") as f:
+        f.write(report_text)
+
+    # 오래된 파일 정리 (최근 30개만 유지)
+    all_reports = sorted(glob.glob(os.path.join(REPORTS_DIR, "report_*.txt")))
+    for old in all_reports[:-30]:
+        try:
+            os.remove(old)
+        except OSError:
+            pass
+
+    return hist_path
+
+
+# ═══════════════════════════════════════════════════════════════
 # 리포트 생성
 # ═══════════════════════════════════════════════════════════════
 def build_report(buy_top: list, sell_top: list,
@@ -453,14 +664,25 @@ def build_report(buy_top: list, sell_top: list,
         L.append("─" * 70)
         for i, r in enumerate(stocks, 1):
             icon = "▲" if r["chg"] >= 0 else "▼"
+            dart_tag = f" [DART:{r['dart_bonus']:+d}]" if r.get("dart_bonus") else ""
+            inv_tag  = f" [투자자:{r['inv_bonus']:+d}]"  if r.get("inv_bonus") else ""
+            flow_tag = f" [수급:{r.get('flow_score', 0):+d}]" if r.get("flow_score") else ""
             L.append(f"\n  {i:2d}위  {signal_label(r['score'])}  "
-                     f"{r['name']} ({r['ticker']})  [{r['group']}]")
+                     f"{r['name']} ({r['ticker']})  [{r['group']}]{dart_tag}{inv_tag}{flow_tag}")
             L.append(f"       점수: {r['score']:+d}점  |  "
                      f"현재가: {r['price']:>12,.2f}  |  등락: {icon}{abs(r['chg']):.2f}%")
             L.append(f"       RSI: {r['rsi']:.1f}  |  MACD: {r['macd_hist']:+.4f}  |  "
                      f"5일모멘텀: {r['mom5']:+.2f}%  |  BB: {r['bb_pct']:.0f}%")
             L.append(f"       MA5: {r['ma5']:,.2f}  MA20: {r['ma20']:,.2f}  "
                      f"MA60: {r['ma60']:,.2f}  |  거래량비: {r['vol_ratio']:.1f}x")
+            # 투자자 노트 (Pelosi·ARK·국내 투자자 명)
+            if r.get("inv_notes"):
+                L.append(f"       👤 {' / '.join(r['inv_notes'][:3])}")
+            # ATR 기반 손절가·목표가 (매수 종목만 표시)
+            if r.get("stop_loss") and r.get("target_price") and r.get("atr"):
+                L.append(f"       ATR14: {r['atr']:,.2f}  |  "
+                         f"손절가: {r['stop_loss']:,.2f}  |  "
+                         f"목표가: {r['target_price']:,.2f}")
 
     fmt_block(buy_top,  "✅  매수 추천 TOP 10  (종합 점수 높은 순)")
     fmt_block(sell_top, "❌  매도 추천 TOP 10  (종합 점수 낮은 순)")
@@ -567,9 +789,19 @@ def main():
     if len(results) < 10:
         print("❌ 유효 데이터 부족 — 종료")
         return
+    print(f"   ✅ 유효 {len(results)}개 스크리닝 완료")
+
+    # ① - b: 국내주 DART 재무 점수 가산 → 재정렬
+    print("  DART 재무 점수 보정 중...")
+    results = apply_dart_bonus(results)
+
+    # ① - c: 국내주 수급 점수 가산 (외국인·기관 5일 순매수)
+    print("  수급 점수 보정 중...")
+    results = apply_investor_flow(results)
+
     buy_top  = results[:10]
     sell_top = results[-10:][::-1]
-    print(f"   ✅ 유효 {len(results)}개 → 매수TOP10 / 매도TOP10 선별 완료")
+    print(f"   ✅ 매수TOP10 / 매도TOP10 선별 완료 (DART·수급 보정 적용)")
 
     # ② 보조 데이터 수집
     print("② 거시경제 · 해외 · 뉴스 수집...")
@@ -582,16 +814,34 @@ def main():
     print("③ Claude 심층 분석 요청...")
     claude_opinion = ask_claude(buy_top, sell_top, macro, news, overseas)
 
-    # ④ 리포트 저장
-    report = build_report(buy_top, sell_top, len(results), claude_opinion)
-    with open(REPORT_PATH, "w", encoding="utf-8") as f:
-        f.write(report)
+    # ④ 리포트 저장 (최신본 + 히스토리)
+    report    = build_report(buy_top, sell_top, len(results), claude_opinion)
+    hist_path = save_report_history(report)
     print(f"④ 리포트 저장: {REPORT_PATH}")
+    print(f"   히스토리  : {hist_path}")
 
     # ⑤ 알림 발송
     print("⑤ 알림 발송...")
     send_email(report)
     send_kakao(buy_top, sell_top)
+
+    # ⑥ DB 저장 + 30일 백테스팅 성과 출력
+    print("⑥ DB 저장 + 백테스팅...")
+    try:
+        from db_manager import save_screening, get_performance_summary
+        save_screening(buy_top, sell_top, macro)
+        perf = get_performance_summary(30)
+        if perf:
+            print(f"   [30일 백테스팅] "
+                  f"종목수:{perf['종목수']}  "
+                  f"승률:{perf['승률(%)']:.1f}%  "
+                  f"평균수익률:{perf['평균수익률']:+.2f}%  "
+                  f"최대수익률:{perf['최대수익률']:+.2f}%  "
+                  f"최대손실률:{perf['최대손실률']:+.2f}%")
+        else:
+            print("   [백테스팅] 데이터 누적 중 (오늘이 첫 실행이면 내일부터 표시)")
+    except Exception as e:
+        print(f"   [DB] ⚠️ {e}")
 
     elapsed = int((datetime.datetime.now() - start).total_seconds())
     print(f"\n✅ 완료! 소요시간 {elapsed // 60}분 {elapsed % 60}초\n")

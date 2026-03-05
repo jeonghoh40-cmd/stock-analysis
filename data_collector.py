@@ -14,39 +14,15 @@ if sys.stdout.encoding != 'utf-8':
 
 import yfinance as yf
 import pandas as pd
+from universe import WATCHLIST   # 단일 관리 → universe.py 참조
 
 pd.set_option('display.max_columns', None)
 pd.set_option('display.width', 200)
 pd.set_option('display.float_format', '{:,.1f}'.format)
 
-# ──────────────────────────────────────────────
-# 관심 종목 목록 (필요시 직접 추가/제거)
-# ──────────────────────────────────────────────
-WATCHLIST = {
-    # 반도체
-    "005930": "삼성전자",
-    "000660": "SK하이닉스",
-    "042700": "한미반도체",
-    # 2차전지
-    "373220": "LG에너지솔루션",
-    "006400": "삼성SDI",
-    "051910": "LG화학",
-    # 인터넷/AI
-    "035420": "NAVER",
-    "035720": "카카오",
-    # 자동차
-    "005380": "현대차",
-    "000270": "기아",
-    # 바이오
-    "207940": "삼성바이오로직스",
-    "068270": "셀트리온",
-    # 금융
-    "105560": "KB금융",
-    "055550": "신한지주",
-    # 방산/기계
-    "012450": "한화에어로스페이스",
-    "329180": "HD현대중공업",
-}
+# WATCHLIST는 universe.py에서 자동 생성됩니다.
+# 종목 추가/삭제는 universe.py의 UNIVERSE 딕셔너리를 수정하세요.
+# 현재 포함: 국내 코스피 대형주 + 코스닥 방산·보안 (총 65개 내외)
 
 
 def fetch_stock_data(ticker_code: str, name: str, period: str = "60d") -> dict | None:
