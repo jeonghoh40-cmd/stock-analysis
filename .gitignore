@@ -36,8 +36,9 @@ Thumbs.db
 # IDE
 .vscode/settings.json
 .idea/
-"Lib/"  
-"Scripts/"  
-"*.json"  
-"*.db"  
-"cache/"  
+Lib/
+Scripts/
+*.json
+*.db
+cache/
+nul
