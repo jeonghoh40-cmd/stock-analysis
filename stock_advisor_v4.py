@@ -657,6 +657,15 @@ def collect_overseas_snapshot() -> dict:
     return snap
 
 
+def load_external_events() -> list:
+    """external_events.json 에서 활성 이벤트 로드 (파일 없으면 빈 리스트)"""
+    try:
+        from external_events import get_active_events
+        return get_active_events()
+    except Exception:
+        return []
+
+
 # ═══════════════════════════════════════════════════════════════
 # 신호 레이블
 # ═══════════════════════════════════════════════════════════════
@@ -708,18 +717,21 @@ def _stock_line(r: dict, include_fund: bool = True) -> str:
 
 def ask_claude_v4(kospi_buy, kosdaq_buy, us_buy,
                   kospi_sell, kosdaq_sell, us_sell,
-                  macro, news, overseas, fear_greed, sector_flows) -> str:
+                  macro, news, overseas, fear_greed, sector_flows,
+                  external_events=None) -> str:
     try:
         import anthropic
         client = anthropic.Anthropic(api_key=_get("ANTHROPIC_API_KEY"))
     except Exception as e:
         return f"[Claude 분석 생략 — ANTHROPIC_API_KEY 없음: {e}]"
 
-    # 캐시 확인
+    # 캐시 확인 (외부 이벤트가 바뀌면 캐시 무효화)
+    ext_events = external_events or []
     cache_data = {
         "date": datetime.datetime.now().strftime("%Y-%m-%d"),
         "kospi_buy": [(r["ticker"], r["score"]) for r in kospi_buy],
         "us_buy": [(r["ticker"], r["score"]) for r in us_buy],
+        "external_events": [e.get("id") for e in ext_events],
     }
     try:
         from token_cache import get_cached_analysis, save_analysis_cache
@@ -761,7 +773,24 @@ def ask_claude_v4(kospi_buy, kosdaq_buy, us_buy,
             lines.append(_stock_line(r))
         return "\n".join(lines)
 
+    # 외부 이벤트 텍스트
+    ext_txt = "  (등록된 외부 변수 없음)"
+    if ext_events:
+        lines = []
+        for ev in ext_events:
+            sectors_str = ", ".join(ev.get("affected_sectors", [])) or "전체"
+            lines.append(
+                f"  [{ev['category']}] {ev['title']}"
+                f" → 예상영향: {ev['impact']} | 영향섹터: {sectors_str}"
+            )
+            if ev.get("description"):
+                lines.append(f"    상세: {ev['description']}")
+        ext_txt = "\n".join(lines)
+
     prompt = f"""주식 전문 애널리스트로서 오늘 {datetime.datetime.now().strftime('%Y-%m-%d')} 투자 의견을 작성하세요.
+
+■ 외부 변수 (최우선 반영 — 아래 이슈가 분석 전체에 영향을 줌)
+{ext_txt}
 
 ■ 시장심리
 {fg_txt}
@@ -790,6 +819,10 @@ def ask_claude_v4(kospi_buy, kosdaq_buy, us_buy,
 
 ────────────────────────────────
 【분석 지침 — 정밀 버전】
+
+## 0. 외부 변수 영향 평가 (이벤트가 있을 때만 작성)
+- "■ 외부 변수"에 등록된 이슈가 시장 전체 또는 특정 섹터에 미치는 단기 영향을 2~3줄로 분석
+- 해당 이슈로 수혜/피해 받는 종목(매수·매도 후보 중)을 구체적으로 언급
 
 ## 1. 매수 종목 (각 종목별)
 [순위. 종목명] ★★★ 강력매수 / ★★ 매수 / ★ 약한매수
@@ -1019,6 +1052,15 @@ def main():
     print(f"   매수: 코스피 {len(kospi_buy)} | 코스닥 {len(kosdaq_buy)} | 미국 {len(us_buy)}")
     print(f"   매도: 코스피 {len(kospi_sell)} | 코스닥 {len(kosdaq_sell)} | 미국 {len(us_sell)}")
 
+    # ③-a 외부 변수 로드
+    external_events = load_external_events()
+    if external_events:
+        print(f"\n   외부 변수 {len(external_events)}개 로드됨:")
+        for ev in external_events:
+            print(f"   · [{ev['category']}] {ev['title']} → {ev['impact']}")
+    else:
+        print("\n   외부 변수 없음 (추가: python external_events.py add)")
+
     # ④ 보조 데이터 수집 (병렬)
     print("\n③ 거시·심리·섹터·뉴스 수집...")
     macro = overseas = fear_greed = sector_flows = news = None
@@ -1051,7 +1093,8 @@ def main():
     claude_opinion = ask_claude_v4(
         kospi_buy, kosdaq_buy, us_buy,
         kospi_sell, kosdaq_sell, us_sell,
-        macro, news, overseas, fear_greed, sector_flows
+        macro, news, overseas, fear_greed, sector_flows,
+        external_events=external_events
     )
 
     # ⑥ 리포트 저장
