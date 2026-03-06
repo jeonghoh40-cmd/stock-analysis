@@ -42,3 +42,22 @@ Scripts/
 *.db
 cache/
 nul
+
+# 실행 결과물 (txt 리포트)
+report*.txt
+ark_report_*.txt
+citrini_report_*.txt
+ark_vs_citrini_outlook_*.txt
+etf_recommendation_*.txt
+compare_*.txt
+performance_report.txt
+portfolio_report.txt
+
+# 대용량 바이너리 / Jupyter 확장 / 참조 자료
+share/
+Ark/
+*.pdf
+
+# DB 파일
+stock_history.db
+stock_performance.db

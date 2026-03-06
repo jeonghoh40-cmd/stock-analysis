@@ -14,7 +14,16 @@
       "Bash(git add:*)",
       "Bash(git commit:*)",
       "Bash(gh auth status:*)",
-      "Bash(gh repo create:*)"
+      "Bash(gh repo create:*)",
+      "Bash(uv:*)",
+      "Bash(where.exe:*)",
+      "Bash(powershell.exe -Command \"Get-Command uv -ErrorAction SilentlyContinue; Get-Command python -ErrorAction SilentlyContinue; Get-Command py -ErrorAction SilentlyContinue\")",
+      "Bash(powershell.exe -Command \"py --version; py -3.13 --version 2>&1; py -3.14 --version 2>&1\")",
+      "Bash(powershell.exe -ExecutionPolicy ByPass -Command \"irm https://astral.sh/uv/install.ps1 | iex\")",
+      "Bash(powershell.exe -Command \"& ''C:\\\\Users\\\\geunho\\\\.local\\\\bin\\\\uv.exe'' --directory ''C:\\\\Users\\\\geunho\\\\AppData\\\\Roaming\\\\Claude\\\\Claude Extensions\\\\ant.dir.cursortouch.windows-mcp'' run windows-mcp --help 2>&1 | head -20\")",
+      "Bash(powershell.exe -Command \"[System.Environment]::GetEnvironmentVariable\\(''Path'', ''User''\\)\")",
+      "Bash(powershell -Command \"Get-WindowsOptionalFeature -Online -FeatureName ''Microsoft-Hyper-V-All'', ''VirtualMachinePlatform'', ''Microsoft-Windows-Subsystem-Linux'' | Select-Object FeatureName, State\")",
+      "Bash(powershell -Command:*)"
     ]
   }
 }

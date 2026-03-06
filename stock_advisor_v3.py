@@ -25,6 +25,7 @@ import json
 import smtplib
 import requests
 import datetime
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -263,10 +264,13 @@ def score_with_investor_weight(ticker: str, base_score: int) -> int:
 # ═══════════════════════════════════════════════════════════════
 # 단일 종목 고속 스크리닝
 # ═══════════════════════════════════════════════════════════════
+_YF_LOCK = threading.Lock()
+
 def screen_one(market: str, name: str, ticker: str) -> Optional[dict]:
     try:
-        df = yf.download(ticker, period="6mo", interval="1d",
-                         progress=False, auto_adjust=True)
+        with _YF_LOCK:
+            df = yf.download(ticker, period="6mo", interval="1d",
+                             progress=False, auto_adjust=True)
         if df is None or df.empty or len(df) < 65:
             return None
         close = df["Close"].squeeze()
@@ -356,6 +360,74 @@ def run_screening() -> dict:
     return results
 
 
+# ═══════════════════════════════════════════════════════════════
+# 데이터 검증 및 정제
+# ═══════════════════════════════════════════════════════════════
+def validate_and_fix(results: dict) -> dict:
+    """
+    스크리닝 결과 데이터 품질 검증:
+      1. 동일 현재가 탐지 → 레이스 컨디션 오염 의심
+      2. 의심 종목 개별 재스크리닝으로 데이터 교정
+      3. 재스크리닝 실패 시 해당 종목 제거
+    """
+    print("\n  ── 데이터 검증 시작 ──")
+    fixed = {}
+    total_corrupted = 0
+    total_removed   = 0
+
+    for market, stocks in results.items():
+        # ① 동일 현재가 탐지
+        price_count: dict = {}
+        for r in stocks:
+            price_count[r["price"]] = price_count.get(r["price"], 0) + 1
+
+        dup_prices  = {p for p, c in price_count.items() if c > 1}
+        dup_tickers = {r["ticker"] for r in stocks if r["price"] in dup_prices}
+
+        if not dup_prices:
+            print(f"  [{market}] ✅ 중복 없음 ({len(stocks)}개 정상)")
+            fixed[market] = stocks
+            continue
+
+        # ② 오염 현황 출력
+        total_corrupted += len(dup_tickers)
+        print(f"  [{market}] ⚠️  중복 가격 {len(dup_prices)}건 → 영향 종목 {len(dup_tickers)}개")
+        for p in sorted(dup_prices):
+            names = [r["name"] for r in stocks if r["price"] == p]
+            print(f"           가격 {p:>14,.2f} : {names}")
+
+        # ③ 의심 종목 개별 재스크리닝
+        print(f"  [{market}] 🔄 재스크리닝 중...")
+        new_stocks = []
+        for r in stocks:
+            if r["ticker"] not in dup_tickers:
+                new_stocks.append(r)
+                continue
+
+            fresh = screen_one(market, r["name"], r["ticker"])
+            if fresh:
+                diff_pct = abs(fresh["price"] - r["price"]) / (r["price"] + 1e-9) * 100
+                print(f"           ✓ {r['name']}: {r['price']:,.0f} → {fresh['price']:,.0f} "
+                      f"(괴리 {diff_pct:.1f}%) 교정 완료")
+                new_stocks.append(fresh)
+            else:
+                total_removed += 1
+                print(f"           ✗ {r['name']}: 재스크리닝 실패 → 제거")
+
+        new_stocks.sort(key=lambda x: x["score"], reverse=True)
+        fixed[market] = new_stocks
+        print(f"  [{market}] ✅ 검증 완료: {len(new_stocks)}개 확정")
+
+    # ④ 최종 요약
+    corrected = total_corrupted - total_removed
+    if total_corrupted:
+        print(f"\n  검증 결과: 오염 {total_corrupted}개 → 교정 {corrected}개 / 제거 {total_removed}개")
+    else:
+        print(f"\n  검증 결과: 모든 데이터 정상")
+    print("  ── 데이터 검증 완료 ──\n")
+    return fixed
+
+
 def signal_label(score: int) -> str:
     if   score >= 70: return "🟢 강한매수"
     elif score >= 40: return "🔵 매수추천"
@@ -364,6 +436,13 @@ def signal_label(score: int) -> str:
     elif score <= -40: return "🟠 매도추천"
     elif score <= -20: return "🔶 약한매도"
     else:              return "⚪ 중립"
+
+
+def signal_label_for_section(score: int, section: str) -> str:
+    label = signal_label(score)
+    if section == "buy" and score <= 0:
+        return "🔷 약한매수 (상대우위)"
+    return label
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -556,13 +635,13 @@ def build_report_with_sell(kospi_buy: list, kosdaq_buy: list, us_buy: list,
     L.append(f"  매도: 코스피 {len(kospi_sell)}개 | 코스닥 {len(kosdaq_sell)}개 | 미국 {len(us_sell)}개")
     L.append("=" * 80)
 
-    def fmt_block(stocks, header, market_icon):
+    def fmt_block(stocks, header, market_icon, section="neutral"):
         L.append("\n" + "─" * 80)
         L.append(f"  {market_icon} {header}")
         L.append("─" * 80)
         for i, r in enumerate(stocks, 1):
             icon = "▲" if r["chg"] >= 0 else "▼"
-            L.append(f"\n  {i:2d}위  {signal_label(r['score'])}  "
+            L.append(f"\n  {i:2d}위  {signal_label_for_section(r['score'], section)}  "
                      f"{r['name']} ({r['ticker']})")
             L.append(f"       점수: {r['score']:+d}점  |  "
                      f"현재가: {r['price']:>12,.2f}  |  등락: {icon}{abs(r['chg']):.2f}%")
@@ -571,13 +650,13 @@ def build_report_with_sell(kospi_buy: list, kosdaq_buy: list, us_buy: list,
             L.append(f"       MA5: {r['ma5']:,.2f}  MA20: {r['ma20']:,.2f}  "
                      f"MA60: {r['ma60']:,.2f}  |  거래량비: {r['vol_ratio']:.1f}x")
 
-    fmt_block(kospi_buy,  "코스피 매수 추천 TOP 10", "🇰🇷")
-    fmt_block(kosdaq_buy, "코스닥 매수 추천 TOP 5", "🇰🇷")
-    fmt_block(us_buy,     "미국 매수 추천 TOP 10", "🇺🇸")
-    
-    fmt_block(kospi_sell,  "코스피 매도 추천 TOP 5", "🇰🇷")
-    fmt_block(kosdaq_sell, "코스닥 매도 추천 TOP 3", "🇰🇷")
-    fmt_block(us_sell,     "미국 매도 추천 TOP 5", "🇺🇸")
+    fmt_block(kospi_buy,  "코스피 매수 추천 TOP 10", "🇰🇷", section="buy")
+    fmt_block(kosdaq_buy, "코스닥 매수 추천 TOP 5",  "🇰🇷", section="buy")
+    fmt_block(us_buy,     "미국 매수 추천 TOP 10",   "🇺🇸", section="buy")
+
+    fmt_block(kospi_sell,  "코스피 매도 추천 TOP 5", "🇰🇷", section="sell")
+    fmt_block(kosdaq_sell, "코스닥 매도 추천 TOP 3", "🇰🇷", section="sell")
+    fmt_block(us_sell,     "미국 매도 추천 TOP 5",   "🇺🇸", section="sell")
 
     L.append("\n" + "=" * 80)
     L.append("  🤖 Claude AI 심층 분석 의견")
@@ -686,7 +765,11 @@ def main():
     # ① 시장별 스크리닝
     print("① 시장별 스크리닝...")
     all_results = run_screening()
-    
+
+    # ①-1. 데이터 검증 및 정제
+    print("①-1. 데이터 검증 및 정제...")
+    all_results = validate_and_fix(all_results)
+
     # 시장별 매수 TOP 선별
     kospi_buy  = all_results["KOSPI"][:RECOMMEND_COUNT["KOSPI"]]
     kosdaq_buy = all_results["KOSDAQ"][:RECOMMEND_COUNT["KOSDAQ"]]
