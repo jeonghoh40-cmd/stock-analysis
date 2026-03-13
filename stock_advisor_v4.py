@@ -36,6 +36,9 @@ import pandas as pd
 import numpy as np
 import feedparser
 from dotenv import dotenv_values
+from universe import get_kr_pools, UNIVERSE
+import data_cleaner
+from broker_news_collector import get_broker_picks
 
 if sys.stdout.encoding != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -57,48 +60,15 @@ EMAIL_USER  = _get("EMAIL_USER")
 EMAIL_PASS  = _get("EMAIL_PASS")
 EMAIL_FROM  = _get("EMAIL_FROM", EMAIL_USER)
 EMAIL_TO    = _get("EMAIL_TO", "geunho@stic.co.kr")
-KAKAO_TOKEN = _get("KAKAO_TOKEN")
+TELEGRAM_BOT_TOKEN = _get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID   = _get("TELEGRAM_CHAT_ID")
 
 
 # ═══════════════════════════════════════════════════════════════
-# 스크리닝 유니버스 (v3와 동일)
+# 스크리닝 유니버스 — universe.py 단일 소스에서 로드
+# KOSPI_POOL / KOSDAQ_POOL: get_kr_pools() 동적 조회 (KOSPI200 + KOSDAQ150)
+# US_POOL: UNIVERSE['🇺🇸 미국'] 정적 anchor
 # ═══════════════════════════════════════════════════════════════
-KOSPI_POOL = {
-    "삼성전자":          "005930.KS",  "SK하이닉스":       "000660.KS",
-    "LG에너지솔루션":    "373220.KS",  "삼성바이오로직스": "207940.KS",
-    "현대차":            "005380.KS",  "기아":             "000270.KS",
-    "NAVER":             "035420.KS",  "셀트리온":         "068270.KS",
-    "POSCO홀딩스":       "005490.KS",  "삼성SDI":          "006400.KS",
-    "LG화학":            "051910.KS",  "SK이노베이션":     "096770.KS",
-    "현대모비스":        "012330.KS",  "KB금융":           "105560.KS",
-    "신한지주":          "055550.KS",  "하나금융지주":     "086790.KS",
-    "삼성물산":          "028260.KS",  "LG전자":           "066570.KS",
-    "SK텔레콤":          "017670.KS",  "KT":               "030200.KS",
-    "두산에너빌리티":    "034020.KS",  "고려아연":         "010130.KS",
-    "삼성전기":          "009150.KS",  "포스코퓨처엠":     "003670.KS",
-    "한화에어로스페이스":"012450.KS",  "LIG넥스원":        "079550.KS",
-    "한국조선해양":      "009540.KS",  "한미반도체":       "042700.KS",
-    "현대건설":          "000720.KS",  "삼성중공업":       "010140.KS",
-    "대한항공":          "003490.KS",  "현대글로비스":     "086280.KS",
-    "GS":                "078930.KS",  "SK":               "034730.KS",
-    "한국전력":          "015760.KS",  "삼성생명":         "032830.KS",
-    "삼성화재":          "000810.KS",  "아모레퍼시픽":     "090430.KS",
-    "CJ제일제당":        "097950.KS",  "오리온":           "271560.KS",
-    "S-Oil":             "010950.KS",  "롯데케미칼":       "011170.KS",
-    "현대중공업":        "329180.KS",  "두산로보틱스":     "457660.KS",
-}
-
-KOSDAQ_POOL = {
-    "에코프로":          "086520.KQ",  "에코프로비엠":     "247540.KQ",
-    "알테오젠":          "196170.KQ",  "루닛":             "426260.KQ",
-    "셀트리온헬스케어":  "091990.KQ",  "카카오게임즈":     "293490.KQ",
-    "펄어비스":          "263750.KQ",  "위메이드":         "112040.KQ",
-    "이오테크닉스":      "064290.KQ",  "유진테크":         "056080.KQ",
-    "피에스케이":        "056190.KQ",  "레인보우로보틱스": "277810.KQ",
-    "HLB":               "028300.KQ",  "파마리서치":       "214450.KQ",
-    "클래시스":          "214150.KQ",  "리노공업":         "058470.KQ",
-    "HPSP":              "403870.KQ",  "티씨케이":         "064760.KQ",
-}
 
 US_POOL = {
     "Apple":             "AAPL",  "NVIDIA":          "NVDA",
@@ -360,14 +330,19 @@ def score_with_investor_weight(ticker: str, base_score: int) -> int:
 # ═══════════════════════════════════════════════════════════════
 # 단일 종목 고속 스크리닝 (신규 지표 포함)
 # ═══════════════════════════════════════════════════════════════
-_YF_LOCK = threading.Lock()
+# Lock → Semaphore: 최대 8개 병렬 다운로드 허용 (기존 Lock은 사실상 순차 실행)
+_YF_SEM = threading.Semaphore(8)
 
 def screen_one(market: str, name: str, ticker: str) -> Optional[dict]:
     try:
-        with _YF_LOCK:
+        with _YF_SEM:
             df = yf.download(ticker, period="12mo", interval="1d",
-                             progress=False, auto_adjust=True)
+                             progress=False, auto_adjust=True, timeout=10)
         if df is None or df.empty or len(df) < 65:
+            return None
+
+        df = data_cleaner.clean(df, ticker)
+        if df is None:
             return None
 
         close  = df["Close"].squeeze()
@@ -427,13 +402,65 @@ def screen_one(market: str, name: str, ticker: str) -> Optional[dict]:
 
 
 # ═══════════════════════════════════════════════════════════════
-# Phase 2: 상위 후보 펀더멘털 보강
+# Phase 2: 상위 후보 펀더멘털 보강 (주 1회 캐시)
 # ═══════════════════════════════════════════════════════════════
 
-def _fetch_fund_one(r: dict) -> dict:
-    """yfinance .info에서 펀더멘털 데이터 수집"""
+_FUND_CACHE: dict = {}           # {ticker: {"cached_at": ISO, "data": {...}}}
+_FUND_CACHE_LOCK = threading.Lock()
+_FUND_CACHE_DAYS = 7             # 7일(1주) 내 캐시 유효
+
+
+def _fund_cache_path() -> str:
+    cache_dir = os.path.join(BASE_DIR, "cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    return os.path.join(cache_dir, "fundamentals.json")
+
+
+def _load_fundamental_cache() -> None:
+    """fundamentals.json → 모듈 레벨 캐시 로드 (1회만)."""
+    global _FUND_CACHE
+    path = _fund_cache_path()
     try:
-        info = yf.Ticker(r["ticker"]).info
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                _FUND_CACHE = json.load(f)
+    except Exception:
+        _FUND_CACHE = {}
+
+
+def _save_fundamental_cache() -> None:
+    """모듈 캐시 → fundamentals.json 저장."""
+    path = _fund_cache_path()
+    try:
+        with _FUND_CACHE_LOCK:
+            snapshot = dict(_FUND_CACHE)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"  ⚠️ 펀더멘털 캐시 저장 실패: {e}")
+
+
+def _fetch_fund_one(r: dict) -> dict:
+    """yfinance .info에서 펀더멘털 수집 (7일 캐시 우선)."""
+    ticker = r["ticker"]
+
+    # ── 캐시 유효성 확인 ─────────────────────────────────────────
+    with _FUND_CACHE_LOCK:
+        entry = _FUND_CACHE.get(ticker)
+    if entry:
+        try:
+            age_days = (
+                datetime.datetime.now()
+                - datetime.datetime.fromisoformat(entry["cached_at"])
+            ).total_seconds() / 86400
+            if age_days < _FUND_CACHE_DAYS:
+                return {**r, "fund": entry["data"]}
+        except Exception:
+            pass
+
+    # ── 캐시 없거나 만료 → yfinance 수집 ─────────────────────────
+    try:
+        info = yf.Ticker(ticker).info
         pe      = info.get("trailingPE") or info.get("forwardPE")
         pb      = info.get("priceToBook")
         roe     = info.get("returnOnEquity")       # 소수점 (0.15 = 15%)
@@ -445,7 +472,7 @@ def _fetch_fund_one(r: dict) -> dict:
 
         fund_s = score_fundamental(pe, pb, roe, margin, eps_g)
 
-        return {**r, "fund": {
+        fund_data = {
             "pe": round(pe, 1) if pe else None,
             "pb": round(pb, 2) if pb else None,
             "roe_pct": round(roe * 100, 1) if roe else None,
@@ -455,16 +482,32 @@ def _fetch_fund_one(r: dict) -> dict:
             "div_yield_pct": round(div_y * 100, 2) if div_y else None,
             "sector": sector,
             "fund_score": fund_s,
-        }}
+        }
+
+        with _FUND_CACHE_LOCK:
+            _FUND_CACHE[ticker] = {
+                "cached_at": datetime.datetime.now().isoformat(),
+                "data": fund_data,
+            }
+
+        return {**r, "fund": fund_data}
     except Exception:
         return r
 
 
 def enrich_with_fundamentals(stocks: list) -> list:
-    """상위 종목 대상 병렬 펀더멘털 수집 (속도를 위해 20개 제한)"""
+    """상위 종목 대상 병렬 펀더멘털 수집 (7일 캐시 활용)."""
     if not stocks:
         return stocks
-    print(f"  📊 펀더멘털 수집 중 ({len(stocks)}개)...")
+    _load_fundamental_cache()
+    cached_cnt = sum(
+        1 for r in stocks
+        if r["ticker"] in _FUND_CACHE
+        and (datetime.datetime.now() - datetime.datetime.fromisoformat(
+            _FUND_CACHE[r["ticker"]].get("cached_at", "2000-01-01")
+        )).total_seconds() / 86400 < _FUND_CACHE_DAYS
+    )
+    print(f"  📊 펀더멘털 수집 ({len(stocks)}개, 캐시 {cached_cnt}개 재사용)...")
     enriched = []
     with ThreadPoolExecutor(max_workers=6) as ex:
         futs = {ex.submit(_fetch_fund_one, r): r for r in stocks}
@@ -474,7 +517,62 @@ def enrich_with_fundamentals(stocks: list) -> list:
             fund_s = result.get("fund", {}).get("fund_score", 0)
             result["score"] = max(-100, min(100, result["score"] + fund_s))
             enriched.append(result)
+    _save_fundamental_cache()
     return enriched
+
+
+# ═══════════════════════════════════════════════════════════════
+# 스크리닝 결과 일별 캐시 (yfinance 데이터 하루 1회만 수집)
+# ═══════════════════════════════════════════════════════════════
+
+def _clean_old_screening_caches(max_days: int = 3) -> None:
+    """screening_YYYYMMDD.json 파일 중 max_days 이상 된 것 자동 삭제."""
+    cache_dir = os.path.join(BASE_DIR, "cache")
+    if not os.path.exists(cache_dir):
+        return
+    cutoff = datetime.datetime.now() - datetime.timedelta(days=max_days)
+    for fname in os.listdir(cache_dir):
+        if not fname.startswith("screening_") or not fname.endswith(".json"):
+            continue
+        fpath = os.path.join(cache_dir, fname)
+        try:
+            mtime = datetime.datetime.fromtimestamp(os.path.getmtime(fpath))
+            if mtime < cutoff:
+                os.remove(fpath)
+        except Exception:
+            pass
+
+
+def _screening_cache_path() -> str:
+    today = datetime.datetime.now().strftime("%Y%m%d")
+    cache_dir = os.path.join(BASE_DIR, "cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    return os.path.join(cache_dir, f"screening_{today}.json")
+
+
+def _load_screening_cache() -> dict:
+    """오늘 날짜의 스크리닝 캐시 로드. 없으면 빈 dict 반환."""
+    path = _screening_cache_path()
+    try:
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            print(f"  ✓ 오늘 스크리닝 캐시 사용 ({path})")
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def _save_screening_cache(results: dict):
+    """스크리닝 결과를 오늘 날짜 파일로 저장."""
+    path = _screening_cache_path()
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(results, f, ensure_ascii=False, indent=2)
+        print(f"  ✓ 스크리닝 결과 캐시 저장 ({path})")
+    except Exception as e:
+        print(f"  ⚠️ 스크리닝 캐시 저장 실패: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -484,10 +582,35 @@ def enrich_with_fundamentals(stocks: list) -> list:
 def run_screening() -> dict:
     results = {"KOSPI": [], "KOSDAQ": [], "US": []}
 
+    # 증권사 추천 Pool 로드 (캐시 우선)
+    broker_picks = get_broker_picks()
+    if broker_picks:
+        print(f"  📋 증권사 추천 Pool: {len(broker_picks)}개 편입")
+        broker_kospi  = {p["name"]: p["ticker"] for p in broker_picks if p["ticker"].endswith(".KS")}
+        broker_kosdaq = {p["name"]: p["ticker"] for p in broker_picks if p["ticker"].endswith(".KQ")}
+        broker_us     = {p["name"]: p["ticker"] for p in broker_picks if not p["ticker"].endswith((".KS", ".KQ"))}
+    else:
+        broker_kospi = broker_kosdaq = broker_us = {}
+
+    kospi_pool, kosdaq_pool = get_kr_pools()  # KOSPI200 + KOSDAQ150 동적 로드
+
+    # 증권사 추천 종목 Pool에 병합 (중복 티커 제외)
+    for pool, bp in [(kospi_pool, broker_kospi), (kosdaq_pool, broker_kosdaq)]:
+        existing = set(pool.values())
+        for n, t in bp.items():
+            if t not in existing:
+                pool[n] = t
+
+    us_pool = dict(US_POOL)
+    existing_us = set(us_pool.values())
+    for n, t in broker_us.items():
+        if t not in existing_us:
+            us_pool[n] = t
+
     for market, pool, workers in [
-        ("KOSPI",  KOSPI_POOL,  8),
-        ("KOSDAQ", KOSDAQ_POOL, 6),
-        ("US",     US_POOL,     8),
+        ("KOSPI",  kospi_pool,  8),
+        ("KOSDAQ", kosdaq_pool, 6),
+        ("US",     us_pool,     8),
     ]:
         print(f"  스크리닝: {market} ({len(pool)}개)...")
         tasks = [(market, n, t) for n, t in pool.items()]
@@ -499,6 +622,10 @@ def run_screening() -> dict:
                     results[market].append(r)
         results[market].sort(key=lambda x: x["score"], reverse=True)
         print(f"    ✓ {market} 유효 {len(results[market])}개")
+
+    excluded = data_cleaner.get_excluded_count()
+    if excluded:
+        print(f"  🗑️  데이터 정제 제외: {excluded}개 (logs/excluded_*.log 참조)")
 
     return results
 
@@ -546,10 +673,10 @@ def collect_macro() -> dict:
         "달러인덱스": "DX=F",
     }.items():
         try:
-            h = yf.Ticker(tk).history(period="5d")
+            h = yf.Ticker(tk).history(period="5d", timeout=10)
             if not h.empty:
-                cur  = h["Close"].iloc[-1]
-                prev = h["Close"].iloc[-2] if len(h) > 1 else cur
+                cur  = float(h["Close"].squeeze().iloc[-1])
+                prev = float(h["Close"].squeeze().iloc[-2]) if len(h) > 1 else cur
                 macro[name] = {
                     "현재": round(cur, 2),
                     "등락(%)": round((cur - prev) / prev * 100, 2),
@@ -604,7 +731,7 @@ def collect_sector_flows() -> dict:
     ]
     for tk, label in sector_etfs:
         try:
-            h = yf.Ticker(tk).history(period="20d")
+            h = yf.Ticker(tk).history(period="20d", timeout=10)
             if not h.empty and len(h) >= 5:
                 cur   = float(h["Close"].iloc[-1])
                 prev  = float(h["Close"].iloc[-2])
@@ -644,7 +771,7 @@ def collect_overseas_snapshot() -> dict:
         ("LMT", "록히드마틴"), ("^TNX", "미10년채"), ("DX=F", "달러인덱스"),
     ]:
         try:
-            h = yf.Ticker(tk).history(period="10d")
+            h = yf.Ticker(tk).history(period="10d", timeout=10)
             if not h.empty:
                 cur  = float(h["Close"].iloc[-1])
                 prev = float(h["Close"].iloc[-2]) if len(h) > 1 else cur
@@ -688,30 +815,64 @@ def signal_label_buy(score: int) -> str:
 # Claude 심층 분석 — v4 강화 프롬프트
 # ═══════════════════════════════════════════════════════════════
 
+_MAX_PROMPT_CHARS = 28_000  # ≈ 8,000 토큰 (한+영 혼합 기준 ~3.5자/토큰)
+
+
+def _extract_claude_json(text: str) -> "tuple[str, dict]":
+    """
+    Claude 응답에서 ```json ... ``` 블록을 추출한다.
+
+    Returns
+    -------
+    (text_without_json, parsed_dict)
+        JSON 파싱 실패 시 (원본 텍스트, {}) 반환.
+    """
+    import re
+    pattern = r"```json\s*(\{.*?\})\s*```"
+    m = re.search(pattern, text, re.DOTALL)
+    if not m:
+        return text, {}
+    json_str = m.group(1)
+    clean_text = text[:m.start()].rstrip()
+    try:
+        return clean_text, json.loads(json_str)
+    except json.JSONDecodeError:
+        return text, {}
+
+
+def _save_claude_structured(data: dict) -> None:
+    """구조화 분석 결과를 cache/claude_structured_YYYYMMDD.json 으로 저장."""
+    today = datetime.datetime.now().strftime("%Y%m%d")
+    cache_dir = os.path.join(BASE_DIR, "cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    path = os.path.join(cache_dir, f"claude_structured_{today}.json")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"saved_at": datetime.datetime.now().isoformat(), **data}, f,
+                      ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
 def _stock_line(r: dict, include_fund: bool = True) -> str:
-    """종목 한 줄 요약 (ATR 손절가 포함)"""
-    stop_loss = round(r["price"] - 2.0 * r["atr"], 2)  # ATR×2 손절가
+    """Claude 프롬프트용 압축 종목 라인 (핵심 지표만)"""
+    stop_loss = round(r["price"] - 2.0 * r["atr"], 2)
     fund      = r.get("fund", {})
-    trend_str = (f"ADX:{r['adx']:.0f}"
-                 f"({'▲강세' if r['plus_di'] > r['minus_di'] else '▼약세'})")
+    trend     = "▲" if r["plus_di"] > r["minus_di"] else "▼"
     fund_str  = ""
     if include_fund and fund:
         parts = []
-        if fund.get("pe"):     parts.append(f"P/E:{fund['pe']}")
-        if fund.get("pb"):     parts.append(f"P/B:{fund['pb']}")
-        if fund.get("roe_pct"): parts.append(f"ROE:{fund['roe_pct']}%")
-        if fund.get("fund_score") is not None: parts.append(f"펀더:{fund['fund_score']:+d}")
-        fund_str = " | " + " ".join(parts) if parts else ""
+        if fund.get("pe"):       parts.append(f"PE:{fund['pe']}")
+        if fund.get("roe_pct"):  parts.append(f"ROE:{fund['roe_pct']}%")
+        if fund.get("fund_score") is not None: parts.append(f"F:{fund['fund_score']:+d}")
+        fund_str = " " + " ".join(parts) if parts else ""
 
     return (
-        f"  {r['name']}({r['ticker']}) 점수:{r['score']:+d} | "
-        f"가격:{r['price']:,.2f}({r['chg']:+.1f}%) | "
-        f"RSI:{r['rsi']:.0f} Stoch:{r['stoch_k']:.0f} | "
-        f"MACD:{r['macd_hist']:+.4f} | BB:{r['bb_pct']:.0f}% | "
-        f"모멘텀:{r['mom5']:+.1f}% | 거래량:{r['vol_ratio']:.1f}x | "
-        f"52w위치:{r['pos_52w']:.0f}% | {trend_str} | "
-        f"ATR:{r['atr_pct']:.1f}% | ATR손절:{stop_loss:,.2f}"
-        f"{fund_str}"
+        f"{r['name']}({r['ticker']}) S:{r['score']:+d} "
+        f"P:{r['price']:,.0f}({r['chg']:+.1f}%) "
+        f"RSI:{r['rsi']:.0f} MACD:{'▲' if r['macd_hist']>0 else '▼'} "
+        f"ADX:{r['adx']:.0f}{trend} 52w:{r['pos_52w']:.0f}% "
+        f"손절:{stop_loss:,.0f}{fund_str}"
     )
 
 
@@ -727,11 +888,10 @@ def ask_claude_v4(kospi_buy, kosdaq_buy, us_buy,
 
     # 캐시 확인 (외부 이벤트가 바뀌면 캐시 무효화)
     ext_events = external_events or []
+    # 캐시 키: 날짜 + 외부이벤트만 사용 (점수 제외 → yfinance 미세 변동으로 캐시 미스 방지)
     cache_data = {
         "date": datetime.datetime.now().strftime("%Y-%m-%d"),
-        "kospi_buy": [(r["ticker"], r["score"]) for r in kospi_buy],
-        "us_buy": [(r["ticker"], r["score"]) for r in us_buy],
-        "external_events": [e.get("id") for e in ext_events],
+        "external_events": sorted([e.get("id", "") for e in ext_events]),
     }
     try:
         from token_cache import get_cached_analysis, save_analysis_cache
@@ -742,139 +902,255 @@ def ask_claude_v4(kospi_buy, kosdaq_buy, us_buy,
     except Exception:
         pass
 
-    # 거시 텍스트
-    macro_txt = "\n".join(
-        f"  {k}: {v['현재']} ({v['등락(%)']:+.2f}%)" for k, v in macro.items()
-    )
-    # Fear & Greed
-    fg_txt = "  정보 없음"
-    if fear_greed:
-        fg_txt = (f"  Fear&Greed: {fear_greed['지수']}/100 "
-                  f"[{fear_greed['단계']}] → {fear_greed['해석']}")
-
-    # 섹터 흐름 (5일 수익률 기준 정렬)
-    sector_sorted = sorted(
-        sector_flows.items(),
-        key=lambda x: x[1].get("5일(%)", 0), reverse=True
-    )
-    sector_txt = "\n".join(
-        f"  {k}: 전일{v['전일(%)']:+.1f}% / 5일{v['5일(%)']:+.1f}%"
-        for k, v in sector_sorted[:10]
+    # 거시 (핵심 7개만)
+    MACRO_KEYS = ["USD/KRW", "VIX", "S&P500", "나스닥", "KOSPI", "미10년채", "WTI유가"]
+    macro_txt = " | ".join(
+        f"{k}:{v['현재']}({v['등락(%)']:+.1f}%)"
+        for k, v in macro.items() if k in MACRO_KEYS
     )
 
-    news_txt = "\n".join(f"  - {h}" for h in news[:8]) or "  (뉴스 없음)"
-    ov_txt   = "\n".join(
-        f"  {k}: {v['현재']} ({v['전일(%)']:+.1f}%)" for k, v in overseas.items()
+    # Fear & Greed 한 줄
+    fg_txt = f"F&G:{fear_greed['지수']}/100→{fear_greed['해석']}" if fear_greed else "F&G:없음"
+
+    # 섹터 흐름 (5일 상위 6개만)
+    sector_sorted = sorted(sector_flows.items(), key=lambda x: x[1].get("5일(%)", 0), reverse=True)
+    sector_txt = " | ".join(
+        f"{k}:{v['5일(%)']:+.1f}%" for k, v in sector_sorted[:6]
+    )
+
+    # 뉴스 5개
+    news_txt = " / ".join(news[:5]) or "(없음)"
+
+    # 해외 (핵심 4개)
+    OV_KEYS = ["엔비디아", "TSMC", "달러인덱스", "미10년채"]
+    ov_txt = " | ".join(
+        f"{k}:{v['현재']}({v['전일(%)']:+.1f}%)"
+        for k, v in overseas.items() if k in OV_KEYS
     )
 
     def block(stocks, label):
-        lines = [f"\n[{label}]"]
-        for r in stocks:
-            lines.append(_stock_line(r))
-        return "\n".join(lines)
+        return f"[{label}] " + " / ".join(_stock_line(r) for r in stocks)
 
-    # 외부 이벤트 텍스트
-    ext_txt = "  (등록된 외부 변수 없음)"
+    # 외부 이벤트
+    ext_txt = ""
     if ext_events:
-        lines = []
-        for ev in ext_events:
-            sectors_str = ", ".join(ev.get("affected_sectors", [])) or "전체"
-            lines.append(
-                f"  [{ev['category']}] {ev['title']}"
-                f" → 예상영향: {ev['impact']} | 영향섹터: {sectors_str}"
-            )
-            if ev.get("description"):
-                lines.append(f"    상세: {ev['description']}")
-        ext_txt = "\n".join(lines)
+        ext_txt = "외부변수: " + " | ".join(
+            f"[{ev['category']}]{ev['title']}→{ev['impact']}" for ev in ext_events
+        ) + "\n"
 
-    prompt = f"""주식 전문 애널리스트로서 오늘 {datetime.datetime.now().strftime('%Y-%m-%d')} 투자 의견을 작성하세요.
+    def _build_prompt(kb, kqb, ub, ks, kqs, us):
+        return f"""{datetime.datetime.now().strftime('%Y-%m-%d')} 주식 애널리스트 투자 의견 작성.
 
-■ 외부 변수 (최우선 반영 — 아래 이슈가 분석 전체에 영향을 줌)
-{ext_txt}
+{ext_txt}거시: {macro_txt}
+심리: {fg_txt}
+섹터5일: {sector_txt}
+해외: {ov_txt}
+뉴스: {news_txt}
 
-■ 시장심리
-{fg_txt}
+{block(kb, 'KR매수')}
+{block(kqb, 'KQ매수')}
+{block(ub, 'US매수')}
+{block(ks, 'KR매도')}
+{block(kqs, 'KQ매도')}
+{block(us, 'US매도')}
 
-■ 거시경제
-{macro_txt}
+지침(간결·수치중심):
+1. 매수종목별: [순위.종목] ★등급 / 매수논리2줄 / 분할매수(1차40%·2차·3차) / 목표가3단계 / 손절가(데이터의 손절값) / 펀더멘털1줄
+2. 매도종목별: [순위.종목] ▼등급 / 매도논리2줄 / 매도전략 / 하락목표가
+3. 시장판단: F&G해석·강세섹터2·약세섹터2·핵심전략·리스크
 
-■ 섹터 자금 흐름 (5일 강→약 순)
-{sector_txt}
+분석 텍스트 작성 후 반드시 아래 형식 JSON을 마지막에 출력하라:
+```json
+{{"top_buy":[{{"ticker":"티커","name":"종목명","grade":"★★★","target1":0,"target2":0,"stop":0}}],"top_sell":[{{"ticker":"티커","name":"종목명","stop":0}}],"market":"시장판단한줄","risk":"핵심리스크한줄","fg_signal":"매수|관망|매도"}}
+```"""
 
-■ 해외지표
-{ov_txt}
+    prompt = _build_prompt(kospi_buy, kosdaq_buy, us_buy, kospi_sell, kosdaq_sell, us_sell)
 
-■ 뉴스
-{news_txt}
-
-■ 매수추천
-{block(kospi_buy, '코스피매수')}
-{block(kosdaq_buy, '코스닥매수')}
-{block(us_buy, '미국매수')}
-
-■ 매도추천
-{block(kospi_sell, '코스피매도')}
-{block(kosdaq_sell, '코스닥매도')}
-{block(us_sell, '미국매도')}
-
-────────────────────────────────
-【분석 지침 — 정밀 버전】
-
-## 0. 외부 변수 영향 평가 (이벤트가 있을 때만 작성)
-- "■ 외부 변수"에 등록된 이슈가 시장 전체 또는 특정 섹터에 미치는 단기 영향을 2~3줄로 분석
-- 해당 이슈로 수혜/피해 받는 종목(매수·매도 후보 중)을 구체적으로 언급
-
-## 1. 매수 종목 (각 종목별)
-[순위. 종목명] ★★★ 강력매수 / ★★ 매수 / ★ 약한매수
-
-✅ 매수 논리 (지표 기반 2개):
-   · RSI/스토캐스틱 과매도 여부
-   · MACD/ADX 추세 확인
-   · 52주 위치 및 거래량 신호
-
-💰 분할매수 전략:
-   · 1차(현재가 40%), 2차(ATR×2 하락시 30%), 3차(ATR×3 하락시 30%)
-
-🎯 목표가 3단계 (BB상단/전고점/과매수):
-   · 각 가격 구체적으로 명시
-
-🛑 손절가: ATR×2 기반 손절 (데이터에 있는 ATR손절가 활용)
-
-📊 펀더멘털 코멘트: P/E·P/B·ROE 평가 1줄 (데이터 있는 경우)
-
----
-
-## 2. 매도 종목 (각 종목별)
-[순위. 종목명] ▼▼▼ 강력매도 / ▼▼ 매도 / ▼ 비중축소
-
-❌ 매도 논리 (지표 기반 2개)
-💸 매도 전략: 즉시 50% + 반등시 잔량
-📉 하락 목표가: 구체적 가격
-
----
-
-## 3. 오늘의 시장 판단 (5~7줄)
-📊 Fear&Greed 해석 → 투자 심리 진단
-📈 강세 섹터 2개 / 약세 섹터 2개 (섹터ETF 흐름 기반)
-💡 단기 핵심 전략 1가지 (구체적 수치 포함)
-⚠️ 주요 리스크 1가지
-
-간결하게, 수치 중심으로 작성."""
+    # ── 토큰 예산 체크 (최대 8,000 토큰 ≈ 28,000자) ───────────────────
+    if len(prompt) > _MAX_PROMPT_CHARS:
+        # 매 반복마다 각 블록에서 종목 1개씩 제거
+        kb, kqb, ub = list(kospi_buy), list(kosdaq_buy), list(us_buy)
+        ks, kqs, us_s = list(kospi_sell), list(kosdaq_sell), list(us_sell)
+        while len(prompt) > _MAX_PROMPT_CHARS and any(len(x) > 1 for x in [kb, kqb, ub, ks, kqs, us_s]):
+            for lst in [kb, kqb, ub, ks, kqs, us_s]:
+                if len(lst) > 1:
+                    lst.pop()
+            prompt = _build_prompt(kb, kqb, ub, ks, kqs, us_s)
+        print(f"  ⚠️ 프롬프트 토큰 초과 → 축소: {len(prompt):,}자 "
+              f"(매수 KR{len(kb)}/KQ{len(kqb)}/US{len(ub)}, 매도 KR{len(ks)}/KQ{len(kqs)}/US{len(us_s)})")
 
     try:
         resp = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=6000,
+            max_tokens=3500,
+            temperature=0,
             messages=[{"role": "user", "content": prompt}],
         )
-        result = resp.content[0].text
+        full_text = resp.content[0].text
+        # JSON 블록 추출 후 텍스트 분리
+        text_part, structured = _extract_claude_json(full_text)
+        if structured:
+            # 구조화 데이터 별도 캐시 저장
+            _save_claude_structured(structured)
         try:
-            save_analysis_cache(cache_data, result)
+            save_analysis_cache(cache_data, full_text)
         except Exception:
             pass
-        return result
+        return text_part
     except Exception as e:
         return f"[Claude API 오류: {e}]"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 규칙 기반 매수/매도 근거 & 리스크 자동 생성
+# ═══════════════════════════════════════════════════════════════
+
+def _auto_analysis(r: dict, section: str) -> list[str]:
+    """
+    지표 데이터만으로 매수/매도 근거·목표가·손절가·리스크를 생성한다.
+    Claude API 유무와 관계없이 항상 리포트에 포함된다.
+    """
+    lines = []
+    price   = r["price"]
+    rsi     = r["rsi"]
+    macd    = r["macd_hist"]
+    adx     = r["adx"]
+    plus_di = r["plus_di"]
+    minus_di= r["minus_di"]
+    mom5    = r["mom5"]
+    pos_52w = r["pos_52w"]
+    stoch_k = r["stoch_k"]
+    vol     = r["vol_ratio"]
+    bb_pct  = r["bb_pct"]
+    bb_up   = r["bb_up"]
+    bb_dn   = r["bb_dn"]
+    atr     = r["atr"]
+    ma20    = r["ma20"]
+    ma60    = r["ma60"]
+    fund    = r.get("fund", {})
+    stop    = round(price - 2.0 * atr, 2)
+
+    if section == "buy":
+        # ── 매수 근거 ──────────────────────────────────────
+        reasons = []
+        if rsi < 30:
+            reasons.append(f"RSI {rsi:.0f} 과매도 — 기술적 반등 신호")
+        elif rsi < 40:
+            reasons.append(f"RSI {rsi:.0f} 약과매도 — 저가 매수 구간")
+        if macd > 0:
+            reasons.append("MACD 히스토그램 양전환 — 상승 모멘텀 확인")
+        if price > ma20 > ma60:
+            reasons.append("이동평균 정배열(가격>MA20>MA60) — 강한 상승 추세")
+        elif price > ma20:
+            reasons.append("가격이 MA20 상회 — 단기 상승 구조")
+        if adx > 25 and plus_di > minus_di:
+            reasons.append(f"ADX {adx:.0f} 강한 추세 (+DI{plus_di:.0f}>-DI{minus_di:.0f}) — 방향성 확립")
+        if pos_52w < 20:
+            reasons.append(f"52주 저점 근처 {pos_52w:.0f}% — 반등 기대")
+        elif pos_52w > 80:
+            reasons.append(f"52주 고점 구간 {pos_52w:.0f}% — 상승 모멘텀 지속")
+        if stoch_k < 20:
+            reasons.append(f"스토캐스틱 {stoch_k:.0f} 과매도 — 반등 가능")
+        if vol > 1.5:
+            reasons.append(f"거래량 {vol:.1f}x 급증 — 수급 유입 신호")
+        if mom5 > 3:
+            reasons.append(f"5일 모멘텀 +{mom5:.1f}% — 단기 상승 흐름")
+        if fund.get("pe") and fund["pe"] < 15:
+            reasons.append(f"P/E {fund['pe']} 저평가 — 가치 매력")
+        if fund.get("roe_pct") and fund["roe_pct"] > 15:
+            reasons.append(f"ROE {fund['roe_pct']}% 고수익성 — 펀더멘털 우량")
+        if not reasons:
+            reasons.append(f"종합점수 {r['score']:+d}점 — 상대적 강세 우위")
+
+        lines.append(f"       ✅ 매수 근거: {' / '.join(reasons[:3])}")
+
+        # ── 분할매수 & 목표가 ──────────────────────────────
+        buy2 = round(price - 2.0 * atr, 2)
+        buy3 = round(price - 3.0 * atr, 2)
+        tgt1 = round(bb_up, 2)
+        tgt2 = round(price * 1.10, 2)
+        tgt3 = round(price * 1.20, 2)
+        lines.append(
+            f"       💰 분할매수: 1차 현재가(40%) / "
+            f"2차 {buy2:,.0f}(ATR×2·30%) / 3차 {buy3:,.0f}(ATR×3·30%)"
+        )
+        lines.append(
+            f"       🎯 목표가: 1차 {tgt1:,.0f}(BB상단) / "
+            f"2차 {tgt2:,.0f}(+10%) / 3차 {tgt3:,.0f}(+20%)"
+        )
+        lines.append(f"       🛑 손절가: {stop:,.0f} (ATR×2 — 변동성 기반 동적 손절)")
+
+        # ── 리스크 ────────────────────────────────────────
+        risks = []
+        if rsi > 60:
+            risks.append(f"RSI {rsi:.0f} — 추가 과열 시 조정 가능")
+        if adx < 20:
+            risks.append(f"ADX {adx:.0f} 횡보 — 추세 신뢰도 낮음")
+        if mom5 < -2:
+            risks.append(f"5일 모멘텀 {mom5:.1f}% — 단기 하락 압력")
+        if price < ma20:
+            risks.append("MA20 하회 — 지지선 붕괴 주의")
+        if bb_pct > 85:
+            risks.append(f"BB {bb_pct:.0f}% — 상단 근접, 단기 과열")
+        if stoch_k > 75:
+            risks.append(f"스토캐스틱 {stoch_k:.0f} — 단기 과매수")
+        if vol < 0.5:
+            risks.append(f"거래량 {vol:.1f}x 위축 — 상승 동력 부족")
+        if fund.get("pe") and fund["pe"] > 40:
+            risks.append(f"P/E {fund['pe']} 고평가 — 밸류에이션 부담")
+        if not risks:
+            risks.append("현재 주요 기술적 리스크 없음")
+        lines.append(f"       ⚠️ 리스크: {' / '.join(risks[:3])}")
+
+    else:  # sell
+        # ── 매도 근거 ──────────────────────────────────────
+        reasons = []
+        if rsi > 70:
+            reasons.append(f"RSI {rsi:.0f} 과매수 — 조정 가능성")
+        elif rsi > 60:
+            reasons.append(f"RSI {rsi:.0f} 과열 진입 — 비중 축소 시점")
+        if macd < 0:
+            reasons.append("MACD 히스토그램 음전환 — 하락 모멘텀")
+        if price < ma20 < ma60:
+            reasons.append("이동평균 역배열(가격<MA20<MA60) — 하락 추세 고착")
+        elif price < ma20:
+            reasons.append("가격이 MA20 하회 — 단기 하락 구조")
+        if adx > 25 and minus_di > plus_di:
+            reasons.append(f"ADX {adx:.0f} 강한 하락 추세 (-DI{minus_di:.0f}>+DI{plus_di:.0f})")
+        if stoch_k > 80:
+            reasons.append(f"스토캐스틱 {stoch_k:.0f} 과매수 — 매도 시점")
+        if mom5 < -3:
+            reasons.append(f"5일 모멘텀 {mom5:.1f}% — 하락 흐름 지속")
+        if pos_52w > 90:
+            reasons.append(f"52주 신고가 {pos_52w:.0f}% — 차익 실현 구간")
+        if not reasons:
+            reasons.append(f"종합점수 {r['score']:+d}점 — 상대적 약세")
+
+        lines.append(f"       ❌ 매도 근거: {' / '.join(reasons[:3])}")
+
+        # ── 매도 전략 & 하락 목표가 ───────────────────────
+        tgt_dn1 = round(bb_dn, 2)
+        tgt_dn2 = round(price * 0.90, 2)
+        lines.append(
+            f"       💸 매도 전략: 즉시 50% 매도 / 반등 시 잔량 정리"
+        )
+        lines.append(
+            f"       📉 하락 목표: 1차 {tgt_dn1:,.0f}(BB하단) / 2차 {tgt_dn2:,.0f}(-10%)"
+        )
+
+        # ── 리스크(매도 포지션 관점) ───────────────────────
+        risks = []
+        if rsi < 30:
+            risks.append(f"RSI {rsi:.0f} 과매도 — 기술적 반등 위험")
+        if mom5 > 3:
+            risks.append(f"단기 급등 {mom5:.1f}% — 숏커버링 주의")
+        if vol > 2.0:
+            risks.append(f"거래량 {vol:.1f}x 급증 — 반전 가능성")
+        if not risks:
+            risks.append("현재 주요 반전 리스크 없음")
+        lines.append(f"       ⚠️ 리스크: {' / '.join(risks[:2])}")
+
+    return lines
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -921,6 +1197,9 @@ def build_report(kospi_buy, kosdaq_buy, us_buy,
                 if fund.get("sector"):  fparts.append(f"섹터:{fund['sector']}")
                 if fparts:
                     L.append(f"       펀더: {' | '.join(fparts)}")
+            # 매수/매도 근거·전략·리스크 (지표 기반, 항상 출력)
+            for line in _auto_analysis(r, section):
+                L.append(line)
 
     fmt_block(kospi_buy,  "코스피 매수 TOP", "🇰🇷", "buy")
     fmt_block(kosdaq_buy, "코스닥 매수 TOP", "🇰🇷", "buy")
@@ -940,10 +1219,153 @@ def build_report(kospi_buy, kosdaq_buy, us_buy,
 
 
 # ═══════════════════════════════════════════════════════════════
-# 이메일 / 카카오톡
+# HTML 이메일 템플릿
 # ═══════════════════════════════════════════════════════════════
 
-def send_email(report_text: str):
+_HTML_CSS = """
+body{font-family:'Apple SD Gothic Neo','Malgun Gothic',sans-serif;margin:0;padding:0;background:#f4f6f8}
+.wrap{max-width:800px;margin:0 auto;background:#fff}
+.hdr{background:linear-gradient(135deg,#1a237e,#283593);color:#fff;padding:20px 24px}
+.hdr h1{margin:0;font-size:18px;font-weight:700}
+.hdr .sub{font-size:12px;opacity:.8;margin-top:4px}
+.fg-bar{display:inline-block;padding:4px 10px;border-radius:12px;font-size:12px;font-weight:700;margin-top:8px}
+.fg-fear{background:#ef5350;color:#fff}
+.fg-greed{background:#66bb6a;color:#fff}
+.fg-mid{background:#ffa726;color:#fff}
+.sec{padding:16px 24px}
+.sec-title{font-size:14px;font-weight:700;color:#1a237e;border-left:4px solid #1a237e;
+           padding-left:10px;margin:0 0 12px}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{background:#e8eaf6;color:#283593;padding:6px 8px;text-align:center;white-space:nowrap}
+td{padding:5px 8px;border-bottom:1px solid #f0f0f0;white-space:nowrap}
+tr:hover td{background:#fafafa}
+.badge-buy{display:inline-block;background:#e8f5e9;color:#2e7d32;border-radius:4px;
+           padding:1px 6px;font-weight:700;font-size:11px}
+.badge-sell{display:inline-block;background:#ffebee;color:#c62828;border-radius:4px;
+            padding:1px 6px;font-weight:700;font-size:11px}
+.score-pos{color:#2e7d32;font-weight:700}
+.score-neg{color:#c62828;font-weight:700}
+.chg-up{color:#c62828}.chg-dn{color:#1565c0}
+.claude-box{background:#f3e5f5;border-left:4px solid #7b1fa2;padding:14px 18px;
+            font-size:12px;line-height:1.7;white-space:pre-wrap;word-break:break-word}
+.perf-box{background:#e8f5e9;border-left:4px solid #2e7d32;padding:14px 18px;font-size:12px}
+.perf-row{display:flex;gap:24px;flex-wrap:wrap}
+.perf-item{flex:1;min-width:120px}
+.perf-label{color:#555;font-size:11px}
+.perf-val{font-size:16px;font-weight:700;color:#1a237e}
+.ftr{background:#eceff1;padding:12px 24px;font-size:11px;color:#777;text-align:center}
+"""
+
+def _html_stock_table(stocks: list, section: str) -> str:
+    """종목 리스트 → HTML 테이블 문자열."""
+    if not stocks:
+        return "<p style='color:#999;font-size:12px'>해당 없음</p>"
+    badge = 'badge-buy' if section == "buy" else 'badge-sell'
+    rows = []
+    for i, r in enumerate(stocks, 1):
+        stop = round(r["price"] - 2.0 * r["atr"], 2)
+        lbl = signal_label_buy(r["score"]) if section == "buy" else signal_label(r["score"])
+        sc_cls = "score-pos" if r["score"] >= 0 else "score-neg"
+        chg_cls = "chg-up" if r["chg"] >= 0 else "chg-dn"
+        chg_sign = "▲" if r["chg"] >= 0 else "▼"
+        fund = r.get("fund", {})
+        pe_str = f"P/E:{fund['pe']}" if fund.get("pe") else ""
+        roe_str = f"ROE:{fund['roe_pct']}%" if fund.get("roe_pct") else ""
+        rows.append(
+            f"<tr>"
+            f"<td style='text-align:center'>{i}</td>"
+            f"<td><span class='{badge}'>{lbl}</span> {r['name']}<br>"
+            f"<small style='color:#888'>{r['ticker']}</small></td>"
+            f"<td class='{sc_cls}' style='text-align:center'>{r['score']:+d}</td>"
+            f"<td style='text-align:right'>{r['price']:,.0f}</td>"
+            f"<td class='{chg_cls}' style='text-align:center'>{chg_sign}{abs(r['chg']):.1f}%</td>"
+            f"<td style='text-align:center'>{r['rsi']:.0f}</td>"
+            f"<td style='text-align:center'>{r['adx']:.0f}</td>"
+            f"<td style='text-align:right'>{stop:,.0f}</td>"
+            f"<td style='color:#888;font-size:11px'>{pe_str} {roe_str}</td>"
+            f"</tr>"
+        )
+    return (
+        "<table><thead><tr>"
+        "<th>#</th><th>종목</th><th>점수</th><th>현재가</th>"
+        "<th>등락</th><th>RSI</th><th>ADX</th><th>손절가</th><th>펀더</th>"
+        "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
+    )
+
+
+def build_html_report(kospi_buy, kosdaq_buy, us_buy,
+                      kospi_sell, kosdaq_sell, us_sell,
+                      total: dict, fear_greed: dict,
+                      claude_opinion: str,
+                      perf_summary: str = "") -> str:
+    """HTML 이메일 본문 생성."""
+    now = datetime.datetime.now().strftime("%Y년 %m월 %d일 %H:%M")
+    fg = fear_greed or {}
+    fg_idx = fg.get("지수", "?")
+    fg_txt = fg.get("해석", "")
+    if isinstance(fg_idx, int):
+        if fg_idx < 40:
+            fg_cls = "fg-fear"
+        elif fg_idx > 60:
+            fg_cls = "fg-greed"
+        else:
+            fg_cls = "fg-mid"
+    else:
+        fg_cls = "fg-mid"
+
+    def section(title: str, content: str) -> str:
+        return (
+            f"<div class='sec'>"
+            f"<div class='sec-title'>{title}</div>"
+            f"{content}</div>"
+        )
+
+    sections = [
+        section("🇰🇷 코스피 매수 TOP", _html_stock_table(kospi_buy, "buy")),
+        section("🇰🇷 코스닥 매수 TOP", _html_stock_table(kosdaq_buy, "buy")),
+        section("🇺🇸 미국 매수 TOP",   _html_stock_table(us_buy, "buy")),
+        section("🇰🇷 코스피 매도 TOP", _html_stock_table(kospi_sell, "sell")),
+        section("🇰🇷 코스닥 매도 TOP", _html_stock_table(kosdaq_sell, "sell")),
+        section("🇺🇸 미국 매도 TOP",   _html_stock_table(us_sell, "sell")),
+    ]
+
+    # Claude 분석
+    import html as _html
+    claude_esc = _html.escape(claude_opinion or "")
+    sections.append(section("🤖 Claude AI 심층 분석",
+                             f"<div class='claude-box'>{claude_esc}</div>"))
+
+    # 성과 요약 (있을 때만)
+    if perf_summary:
+        perf_esc = _html.escape(perf_summary)
+        sections.append(section("📈 최근 30일 성과",
+                                 f"<div class='perf-box'><pre style='margin:0;font-size:11px'>{perf_esc}</pre></div>"))
+
+    body = "".join(sections)
+    scan_info = (f"스캔: 코스피 {total.get('KOSPI',0)}개 | "
+                 f"코스닥 {total.get('KOSDAQ',0)}개 | 미국 {total.get('US',0)}개")
+
+    return f"""<!DOCTYPE html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI 주식 스크리닝 v4</title>
+<style>{_HTML_CSS}</style></head>
+<body><div class="wrap">
+<div class="hdr">
+  <h1>📊 AI 주식 스크리닝 v4 &nbsp;&nbsp;{now}</h1>
+  <div class="sub">{scan_info}</div>
+  <span class="{fg_cls} fg-bar">Fear&amp;Greed {fg_idx}/100 — {fg_txt}</span>
+</div>
+{body}
+<div class="ftr">⚠️ 기술적·펀더멘털 분석 참고용 / 투자 손익 책임은 본인에게 있습니다.</div>
+</div></body></html>"""
+
+
+# ═══════════════════════════════════════════════════════════════
+# 이메일 / 텔레그램
+# ═══════════════════════════════════════════════════════════════
+
+def send_email(report_text: str, html_report: str = ""):
     if not EMAIL_USER or not EMAIL_PASS:
         print("[이메일] EMAIL_USER / EMAIL_PASS 미설정 — 건너뜀")
         return
@@ -955,33 +1377,38 @@ def send_email(report_text: str):
         )
         msg["From"] = EMAIL_FROM
         msg["To"]   = EMAIL_TO
+        # plain text 먼저 (폴백), HTML 나중에 (이메일 클라이언트가 마지막 part를 선호)
         msg.attach(MIMEText(report_text, "plain", "utf-8"))
+        if html_report:
+            msg.attach(MIMEText(html_report, "html", "utf-8"))
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as srv:
             srv.starttls()
             srv.login(EMAIL_USER, EMAIL_PASS)
             srv.sendmail(EMAIL_FROM, EMAIL_TO, msg.as_string())
-        print(f"[이메일] ✅ {EMAIL_TO} 발송 완료")
+        print(f"[이메일] ✅ {EMAIL_TO} HTML+Text 발송 완료")
     except Exception as e:
         print(f"[이메일] ❌ 실패: {e}")
 
 
-def send_kakao(kospi_buy, kosdaq_buy, us_buy, kospi_sell, kosdaq_sell, us_sell,
-               fear_greed: dict):
-    if not KAKAO_TOKEN:
-        print("[카카오톡] KAKAO_TOKEN 미설정 — 건너뜀")
+def send_telegram(kospi_buy, kosdaq_buy, us_buy, kospi_sell, kosdaq_sell, us_sell,
+                  fear_greed: dict):
+    """텔레그램 봇으로 스크리닝 요약 발송"""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("[텔레그램] TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 미설정 — 건너뜀")
         return
+
     today = datetime.datetime.now().strftime("%m/%d")
-    lines = [f"📊 [{today}] AI 주식 v4\n"]
+    lines = [f"<b>📊 [{today}] AI 주식 v4</b>"]
 
     if fear_greed:
-        lines.append(f"😱 Fear&Greed: {fear_greed['지수']}/100 {fear_greed['해석']}\n")
+        lines.append(f"😱 Fear&Greed: {fear_greed['지수']}/100 {fear_greed['해석']}")
 
     for header, stocks in [
         ("🇰🇷 코스피 매수", kospi_buy),
         ("🇰🇷 코스닥 매수", kosdaq_buy),
         ("🇺🇸 미국 매수",   us_buy),
     ]:
-        lines.append(f"\n{header}")
+        lines.append(f"\n<b>{header}</b>")
         for i, r in enumerate(stocks, 1):
             stop = round(r["price"] - 2.0 * r["atr"], 2)
             lines.append(f"  {i}. {r['name']} {r['score']:+d}점 "
@@ -993,7 +1420,7 @@ def send_kakao(kospi_buy, kosdaq_buy, us_buy, kospi_sell, kosdaq_sell, us_sell,
         ("🇰🇷 코스닥 매도", kosdaq_sell),
         ("🇺🇸 미국 매도",   us_sell),
     ]:
-        lines.append(f"\n{header}")
+        lines.append(f"\n<b>{header}</b>")
         for i, r in enumerate(stocks, 1):
             lines.append(f"  {i}. {r['name']} {r['score']:+d}점 "
                          f"RSI:{r['rsi']:.0f} {r['chg']:+.1f}%")
@@ -1001,19 +1428,18 @@ def send_kakao(kospi_buy, kosdaq_buy, us_buy, kospi_sell, kosdaq_sell, us_sell,
     lines.append("\n📄 상세 내용은 이메일 확인")
     text = "\n".join(lines)
     try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         resp = requests.post(
-            "https://kapi.kakao.com/v2/api/talk/memo/default/send",
-            headers={"Authorization": f"Bearer {KAKAO_TOKEN}"},
-            data={"template_object": json.dumps({
-                "object_type": "text", "text": text,
-                "link": {"web_url": "", "mobile_web_url": ""},
-            })},
+            url,
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"},
             timeout=10,
         )
-        print("[카카오톡] ✅ 발송 완료" if resp.status_code == 200
-              else f"[카카오톡] ❌ {resp.status_code}: {resp.text[:100]}")
+        if resp.status_code == 200:
+            print("[텔레그램] ✅ 발송 완료")
+        else:
+            print(f"[텔레그램] ❌ {resp.status_code}: {resp.text[:200]}")
     except Exception as e:
-        print(f"[카카오톡] ❌ {e}")
+        print(f"[텔레그램] ❌ {e}")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1025,19 +1451,35 @@ def main():
     print(f"\n🚀 AI 주식 스크리닝 v4 시작 — {start.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"   [신규] ATR손절가 / 스토캐스틱 / ADX / OBV / 52주위치 / 펀더멘털 / Fear&Greed\n")
 
-    # ① 기술적 스크리닝
-    print("① 전 종목 기술적 스크리닝...")
-    all_results = run_screening()
-    all_results = validate_and_fix(all_results)
+    # 캐시 자동 정리 (7일 이상 된 Claude 캐시 / 3일 이상 된 스크리닝 캐시)
+    try:
+        from token_cache import clear_old_cache
+        deleted = clear_old_cache(7)
+        if deleted > 0:
+            print(f"  🧹 오래된 Claude 캐시 {deleted}개 삭제")
+    except Exception:
+        pass
+    _clean_old_screening_caches(max_days=3)
 
-    # ② 상위 후보 펀더멘털 보강 (매수 후보 20개 대상)
-    print("\n② 상위 후보 펀더멘털 보강...")
-    for market in ["KOSPI", "KOSDAQ", "US"]:
-        top_n = 20
-        enriched = enrich_with_fundamentals(all_results[market][:top_n])
-        enriched.sort(key=lambda x: x["score"], reverse=True)
-        all_results[market][:top_n] = enriched
-    print("   ✓ 펀더멘털 점수 반영 완료")
+    # ① 기술적 스크리닝 (오늘 캐시 있으면 재사용)
+    print("① 전 종목 기술적 스크리닝...")
+    cached_screening = _load_screening_cache()
+    if cached_screening:
+        all_results = cached_screening
+        print("   (캐시 재사용 — yfinance 재수집 생략)")
+    else:
+        all_results = run_screening()
+        all_results = validate_and_fix(all_results)
+
+        # ② 상위 후보 펀더멘털 보강 (매수 후보 20개 대상)
+        print("\n② 상위 후보 펀더멘털 보강...")
+        for market in ["KOSPI", "KOSDAQ", "US"]:
+            top_n = 10  # 20→10: 펀더멘털 수집 시간 절반 단축
+            enriched = enrich_with_fundamentals(all_results[market][:top_n])
+            enriched.sort(key=lambda x: x["score"], reverse=True)
+            all_results[market][:top_n] = enriched
+        print("   ✓ 펀더멘털 점수 반영 완료")
+        _save_screening_cache(all_results)
 
     # ③ 최종 매수/매도 선별
     kospi_buy   = all_results["KOSPI"][:RECOMMEND_COUNT["KOSPI"]]
@@ -1108,29 +1550,160 @@ def main():
         f.write(report)
     print(f"⑤ 리포트 저장: {REPORT_PATH}")
 
-    # ⑦ 성능 추적
+    # ⑦ 성능 추적 + 성과 요약
+    perf_summary = ""
+    print("\n⑤ 성능 추적 업데이트...")
     try:
-        from performance_tracker import init_database, save_daily_recommendations, update_price_tracking
+        from performance_tracker import (
+            init_database, save_daily_recommendations,
+            update_price_tracking, generate_performance_report,
+        )
         init_database()
-        today = datetime.datetime.now().strftime("%Y-%m-%d")
-        save_daily_recommendations(today, {
+        today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+        save_daily_recommendations(today_str, {
             "kospi_buy": kospi_buy, "kospi_sell": kospi_sell,
             "kosdaq_buy": kosdaq_buy, "kosdaq_sell": kosdaq_sell,
             "us_buy": us_buy, "us_sell": us_sell,
         })
         update_price_tracking()
-        print("   ✓ 성능 추적 저장 완료")
+        # 30일 성과 요약 생성
+        perf_summary = generate_performance_report(30)
+        perf_path = os.path.join(BASE_DIR, "performance_report.txt")
+        with open(perf_path, "w", encoding="utf-8") as f:
+            f.write(perf_summary)
+        print(f"   ✓ 성능 추적 완료 / 성과 리포트: {perf_path}")
     except Exception as e:
         print(f"   ⚠️ 성능 추적 실패: {e}")
 
-    # ⑧ 알림 발송
-    print("\n⑥ 알림 발송...")
-    send_email(report)
-    send_kakao(kospi_buy, kosdaq_buy, us_buy, kospi_sell, kosdaq_sell, us_sell, fear_greed)
+    # ⑧ HTML 이메일 빌드
+    html_report = build_html_report(
+        kospi_buy, kosdaq_buy, us_buy,
+        kospi_sell, kosdaq_sell, us_sell,
+        {k: len(v) for k, v in all_results.items()},
+        fear_greed, claude_opinion,
+        perf_summary=perf_summary,
+    )
+    html_path = os.path.join(BASE_DIR, "report_v4.html")
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(html_report)
+    print(f"⑥ HTML 리포트 저장: {html_path}")
+
+    # ⑨ 알림 발송
+    print("\n⑦ 알림 발송...")
+    send_email(report, html_report=html_report)
+    send_telegram(kospi_buy, kosdaq_buy, us_buy, kospi_sell, kosdaq_sell, us_sell, fear_greed)
 
     elapsed = int((datetime.datetime.now() - start).total_seconds())
     print(f"\n✅ 완료! 소요시간 {elapsed // 60}분 {elapsed % 60}초\n")
 
 
+# ═══════════════════════════════════════════════════════════════
+# 테마별 유니버스 필터
+# ═══════════════════════════════════════════════════════════════
+
+_THEMES: dict = {
+    "ai": {
+        "desc": "AI·반도체·클라우드",
+        "tickers": {
+            "NVDA","AMD","AVGO","TSM","INTC","QCOM","AMAT","LRCX","KLAC","MU",
+            "SNOW","DDOG","PLTR","NOW","CRWD","PANW","MSFT","GOOGL","META","AMZN",
+            "005930.KS","000660.KS","009150.KS","011070.KS","042700.KS",  # 반도체 KR
+            "CRWV","CBRS",  # AI IPO
+        },
+    },
+    "defense": {
+        "desc": "방위산업",
+        "tickers": {
+            "LMT","RTX","GD","NOC","BA","HII","LDOS",
+            "012450.KS","079550.KS","047810.KS","034020.KS",  # 한화에어로, LIG, KAI, 두산에너빌
+            "214430.KQ","274090.KQ","065150.KQ","013810.KQ","010820.KQ",  # 코스닥 방산
+            "099440.KQ",  # 쎄트렉아이
+        },
+    },
+    "bio": {
+        "desc": "바이오·헬스케어",
+        "tickers": {
+            "LLY","UNH","JNJ","PFE","MRNA","NVO","ABBV","MRK","ABT","REGN",
+            "207940.KS","068270.KS","323410.KS",  # 삼성바이오, 셀트리온, 카카오뱅크
+        },
+    },
+    "energy": {
+        "desc": "에너지·전력",
+        "tickers": {
+            "XOM","CVX","COP","NEE","BP","SLB","EOG",
+            "034020.KS","015760.KS","096770.KS","373220.KS","006400.KS","051910.KS",
+        },
+    },
+    "finance": {
+        "desc": "금융·핀테크",
+        "tickers": {
+            "JPM","GS","MS","BAC","WFC","V","MA","AXP","BLK","COIN","PYPL",
+            "105560.KS","055550.KS","086790.KS","032830.KS","000810.KS",  # 금융 KR
+            "KLAR",
+        },
+    },
+    "kr": {"desc": "국내(코스피+코스닥) 전용", "suffix": (".KS", ".KQ")},
+    "us": {"desc": "미국 전용",                "suffix": ("",)},
+}
+
+
+def _apply_theme(pool: dict, theme: str) -> dict:
+    """pool {name: ticker}를 테마 기준으로 필터링."""
+    if theme == "all" or theme not in _THEMES:
+        return pool
+    cfg = _THEMES[theme]
+    if "suffix" in cfg:
+        suffixes = cfg["suffix"]
+        return {
+            n: t for n, t in pool.items()
+            if any(t.endswith(s) for s in suffixes)
+            or (not suffixes[0] and not t.endswith((".KS", ".KQ")))
+        }
+    tickers = cfg.get("tickers", set())
+    return {n: t for n, t in pool.items() if t in tickers}
+
+
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="AI 주식 스크리닝 v4",
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    parser.add_argument(
+        "--theme",
+        choices=["all", "ai", "defense", "bio", "energy", "finance", "kr", "us"],
+        default="all",
+        help=(
+            "스크리닝 테마 선택 (기본: all)\n"
+            + "\n".join(f"  {k:10s} — {v['desc']}" for k, v in _THEMES.items())
+        ),
+    )
+    args = parser.parse_args()
+
+    # 테마 적용: run_screening 내부 pool을 래핑
+    if args.theme != "all":
+        _orig_screen_one = screen_one
+        _theme_cfg = _THEMES[args.theme]
+        print(f"\n[테마] {args.theme} — {_theme_cfg['desc']}")
+
+        _orig_run_screening = run_screening
+
+        def run_screening():
+            results = _orig_run_screening()
+            # 테마 필터: 각 시장 결과를 ticker 기준으로 걸러냄
+            cfg = _THEMES[args.theme]
+            if "tickers" in cfg:
+                keep = cfg["tickers"]
+                for mkt in results:
+                    results[mkt] = [r for r in results[mkt] if r["ticker"] in keep]
+            elif "suffix" in cfg:
+                suf = cfg["suffix"]
+                for mkt in results:
+                    results[mkt] = [
+                        r for r in results[mkt]
+                        if any(r["ticker"].endswith(s) for s in suf)
+                        or (not suf[0] and not r["ticker"].endswith((".KS", ".KQ")))
+                    ]
+            return results
+
     main()

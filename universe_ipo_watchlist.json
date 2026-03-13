@@ -1,0 +1,23 @@
+[
+  {
+    "name": "CoreWeave",
+    "ticker": "CRWV",
+    "listed_date": "2025-03-28",
+    "market": "NASDAQ",
+    "note": "AI 클라우드 인프라 — NVIDIA 지분 보유"
+  },
+  {
+    "name": "Cerebras Systems",
+    "ticker": "CBRS",
+    "listed_date": "2025-09-10",
+    "market": "NASDAQ",
+    "note": "AI 반도체 — 웨이퍼 스케일 칩"
+  },
+  {
+    "name": "Klarna",
+    "ticker": "KLAR",
+    "listed_date": "2025-07-01",
+    "market": "NYSE",
+    "note": "BNPL 핀테크"
+  }
+]

@@ -2,7 +2,8 @@
 .env
 .env.local
 .env.production
-# .env.example 은 예외 (키 목록만 있고 값 없음)
+.env.*.local
+# .env.example 은 추적함 — 단, 플레이스홀더만 있어야 함 (실제 키 금지)
 
 # 개인 설정 파일 (비밀번호/토큰 포함)
 email_config.json
@@ -39,6 +40,8 @@ Thumbs.db
 Lib/
 Scripts/
 *.json
+!universe_ipo_watchlist.json
+!.mcp.json
 *.db
 cache/
 nul

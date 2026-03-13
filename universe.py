@@ -1,14 +1,41 @@
 """
 스크리닝 유니버스 & 관심 종목 공통 정의 (Single Source of Truth)
 ─────────────────────────────────────────────────────────────────
-모든 파일이 이 파일에서 종목 목록을 참조한다.
-종목 추가·삭제·변경은 이 파일 하나만 수정하면 전체 시스템에 자동 반영된다.
+[정적]  UNIVERSE            — 국내·미국·중국ETF 고정 종목
+[동적]  get_sp500_top20()   — S&P500 시총 상위 20 실시간 조회 (6h 캐시)
+[동적]  get_recent_ipos()   — 신규상장 종목 자동 편입 (JSON 파일 기반)
+[감시]  update_sell_pool()  — 유동성 급감 → SELL_POOL 자동 이동
+[통합]  get_full_universe() — 정적 + 동적 유니버스 병합 반환
 
-사용처:
-  stock_advisor.py  →  from universe import UNIVERSE
-  data_collector.py →  from universe import WATCHLIST
-  dart_collector.py →  (data_collector 경유)
+종목 추가·삭제는 이 파일(정적) 또는 universe_ipo_watchlist.json(IPO)만 수정.
 """
+
+import json
+import logging
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Optional
+
+import yfinance as yf
+
+logger = logging.getLogger(__name__)
+
+# ═══════════════════════════════════════════════════════════════════
+# 0. 상수
+# ═══════════════════════════════════════════════════════════════════
+
+_KR_INDEX_CACHE_TTL_SEC  = 24 * 3600  # KOSPI/KOSDAQ 지수 구성종목 24시간 캐시
+_SP500_CACHE_TTL_SEC     =  6 * 3600  # S&P500 시총 상위 6시간 캐시
+
+KOSPI200_INDEX_CODE  = "KOSPI"   # FinanceDataReader — 시총 상위 200개 사용
+KOSDAQ150_INDEX_CODE = "KOSDAQ"  # FinanceDataReader — 시총 상위 150개 사용
+
+_kospi200_cache:  Optional[tuple] = None  # (cached_at, {name: ticker})
+_kosdaq150_cache: Optional[tuple] = None
+
+# ═══════════════════════════════════════════════════════════════════
+# 1. 정적 유니버스 (Anchor — pykrx fallback 및 보조 종목)
+# ═══════════════════════════════════════════════════════════════════
 
 UNIVERSE: dict = {
 
@@ -39,32 +66,26 @@ UNIVERSE: dict = {
         "대한항공":           "003490.KS",  "현대글로비스":      "086280.KS",
         "GS":                 "078930.KS",  "SK":                "034730.KS",
         "한국조선해양":       "009540.KS",  "한미반도체":        "042700.KS",
-        # ── 방산 대형주 (코스피) ─────────────────────────────────
-        "LIG넥스원":          "079550.KS",  # 유도무기·레이더 전문
-        "한국항공우주":       "047810.KS",  # KAI, FA-50 수출
+        "LIG넥스원":          "079550.KS",  "한국항공우주":      "047810.KS",
     },
 
-    # ─── 코스닥 방산·보안 (이란-미국 긴장 테마) ──────────────────
+    # ─── 코스닥 방산·보안 ──────────────────────────────────────────
     "🛡️ 코스닥 방산·보안": {
-        # 방산 / 무기·부품
-        "아이쓰리시스템":     "214430.KQ",  # 군용 적외선 열화상 센서
-        "켄코아에어로스페이스":"274090.KQ", # 항공기 구조물·방산 부품
-        "빅텍":               "065150.KQ",  # 군용 전자장비·전원공급장치
-        "스페코":             "013810.KQ",  # 방산 구동장치 (K2전차·자주포)
-        "퍼스텍":             "010820.KQ",  # 방산 정밀부품·방위산업 기계
-        # "나노스":           "151910.KQ",  # 상장폐지 (2025 년)
-        # 사이버보안
-        "안랩":               "053800.KQ",  # 국내 1위 보안 솔루션
-        "이글루코퍼레이션":   "067920.KQ",  # 통합보안관제(SIEM)
-        "지니언스":           "263860.KQ",  # 네트워크 접근제어(NAC)
-        "라온시큐어":         "042510.KQ",  # 인증·암호화 보안
-        "드림시큐리티":       "203650.KQ",  # PKI·전자서명
-        # 드론·위성
-        "쎄트렉아이":         "099440.KQ",  # 군용 위성·광학 감시 시스템
-        # "에이스테크":       "088920.KQ",  # 상장폐지 (2025 년)
+        "아이쓰리시스템":       "214430.KQ",
+        "켄코아에어로스페이스": "274090.KQ",
+        "빅텍":                 "065150.KQ",
+        "스페코":               "013810.KQ",
+        "퍼스텍":               "010820.KQ",
+        "안랩":                 "053800.KQ",
+        "이글루코퍼레이션":     "067920.KQ",
+        "지니언스":             "263860.KQ",
+        "라온시큐어":           "042510.KQ",
+        "드림시큐리티":         "203650.KQ",
+        "쎄트렉아이":           "099440.KQ",
     },
 
-    # ─── 미국 대형주 ──────────────────────────────────────────────
+    # ─── 미국 대형주 (고정 베이스 60개) ──────────────────────────
+    # S&P500 시총 상위 20은 get_sp500_top20()이 실시간으로 추가 편입
     "🇺🇸 미국": {
         "Apple":              "AAPL",   "NVIDIA":           "NVDA",
         "Microsoft":          "MSFT",   "Alphabet":         "GOOGL",
@@ -98,26 +119,344 @@ UNIVERSE: dict = {
         "Walt Disney":        "DIS",    "McDonald's":       "MCD",
     },
 
-    # ─── 중국 (상장폐지 4종목 제외 후) ───────────────────────────
-    "🇨🇳 중국": {
-        "알리바바":     "BABA",   "징둥닷컴":   "JD",    "바이두":      "BIDU",
-        "핀둬둬":       "PDD",    "넷이즈":     "NTES",  "비리비리":    "BILI",
-        "샤오펑":       "XPEV",   "니오":       "NIO",   "리오토":      "LI",
-        "ZTO Express":  "ZTO",    "Trip.com":   "TCOM",  "Vipshop":     "VIPS",
-        "Ke Holdings":  "BEKE",   "iQIYI":      "IQ",    "Weibo":       "WB",
-        "360 Finance":  "QFIN",   "Lufax":      "LU",    "Full Truck":  "YMM",
-        "Kanzhun":      "BZ",     "New Orient": "EDU",   "TAL Education":"TAL",
-        "Daqo Energy":  "DQ",     "JinkoSolar": "JKS",   "ACM Research":"ACMR",
-        "Himax Tech":   "HIMX",   "Agora":      "API",   "Kingsoft Cloud":"KC",
-        "Tuya Smart":   "TUYA",   "Liqtech Intl":"LIQT", "UTStarcom":   "UTSI",
-        "GreenPower":   "GP",     "Sohu.com":   "SOHU",  "Remark Hdgs": "MARK",
-        "Ebang Intl":   "EBON",   "Nano-X":     "NNOX",  "ChinaNet":    "CNET",
+    # ─── 중국ETF (KRX 상장 — 한국 증권사 판매 상품만) ──────────────
+    # 개별 중국 ADR(BABA·JD 등) 및 홍콩 직상장 종목은 포함하지 않음
+    "🇨🇳 중국ETF": {
+        "TIGER 차이나CSI300":     "192090.KS",
+        "KODEX 차이나H주":        "099140.KS",
+        "TIGER 차이나전기차":     "305540.KS",
+        "KODEX 차이나항셍테크":   "371160.KS",
+        "KINDEX 중국본토CSI300":  "168580.KS",
+        "KODEX 차이나CSI300합성": "310080.KS",
     },
 }
 
-# ─── data_collector 전용: 심층 분석 대상 (DART + 기술지표) ──────
-# 국내 코스피 + 코스닥 방산·보안 통합
-# 형식: {종목코드: 종목명}  (yfinance suffix 제거)
+
+# ═══════════════════════════════════════════════════════════════════
+# 2. KOSPI 200 / KOSDAQ 150 동적 편입 (FinanceDataReader)
+# ═══════════════════════════════════════════════════════════════════
+
+_FDR_TOP_N = {"KOSPI": 200, "KOSDAQ": 150}
+
+def _fetch_kr_index(index_code: str, suffix: str) -> dict:
+    """
+    FinanceDataReader로 시장 전체 목록을 조회한 뒤 시총 상위 N개를 반환.
+    KOSPI → 상위 200개(KOSPI200 근사), KOSDAQ → 상위 150개(KOSDAQ150 근사).
+    미설치 또는 API 오류 시 빈 딕셔너리 반환.
+    """
+    try:
+        import FinanceDataReader as fdr
+        top_n = _FDR_TOP_N.get(index_code, 200)
+        df = fdr.StockListing(index_code)
+        df = df.dropna(subset=["Marcap"])
+        df = df.sort_values("Marcap", ascending=False).head(top_n)
+        result: dict = {}
+        for _, row in df.iterrows():
+            code = str(row.get("Code", "")).zfill(6)
+            name = str(row.get("Name", code))
+            if code:
+                result[name] = f"{code}{suffix}"
+        return result
+    except ImportError:
+        logger.warning("[FinanceDataReader] 미설치 — pip install finance-datareader")
+        return {}
+    except Exception as e:
+        logger.warning(f"[FinanceDataReader] index={index_code} 조회 실패: {e}")
+        return {}
+
+
+def get_kospi200() -> dict:
+    """
+    KOSPI 200 구성종목 반환 ({종목명: XXXXXX.KS}, 24시간 캐시).
+    pykrx 미설치 시 UNIVERSE['🇰🇷 국내'] fallback.
+    """
+    global _kospi200_cache
+    now = datetime.now()
+    if _kospi200_cache and (now - _kospi200_cache[0]).total_seconds() < _KR_INDEX_CACHE_TTL_SEC:
+        return _kospi200_cache[1]
+
+    data = _fetch_kr_index(KOSPI200_INDEX_CODE, ".KS")
+    if not data:
+        logger.warning("[KOSPI200] fallback → 정적 UNIVERSE['🇰🇷 국내'] 사용")
+        data = UNIVERSE.get("🇰🇷 국내", {})
+
+    _kospi200_cache = (now, data)
+    logger.info(f"[KOSPI200] {len(data)}개 갱신 완료")
+    return data
+
+
+def get_kosdaq150() -> dict:
+    """
+    KOSDAQ 150 구성종목 반환 ({종목명: XXXXXX.KQ}, 24시간 캐시).
+    pykrx 미설치 시 UNIVERSE['🛡️ 코스닥 방산·보안'] fallback.
+    """
+    global _kosdaq150_cache
+    now = datetime.now()
+    if _kosdaq150_cache and (now - _kosdaq150_cache[0]).total_seconds() < _KR_INDEX_CACHE_TTL_SEC:
+        return _kosdaq150_cache[1]
+
+    data = _fetch_kr_index(KOSDAQ150_INDEX_CODE, ".KQ")
+    if not data:
+        logger.warning("[KOSDAQ150] fallback → 정적 UNIVERSE['🛡️ 코스닥 방산·보안'] 사용")
+        data = UNIVERSE.get("🛡️ 코스닥 방산·보안", {})
+
+    _kosdaq150_cache = (now, data)
+    logger.info(f"[KOSDAQ150] {len(data)}개 갱신 완료")
+    return data
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 3. S&P500 시총 상위 20 동적 편입
+# ═══════════════════════════════════════════════════════════════════
+
+# 후보 풀: S&P500 시총 상위 50 범위 종목 (주기적으로 검토)
+_SP500_CANDIDATES: dict = {
+    # ── 빅테크 / AI ──────────────────────────────────────────────
+    "Apple":            "AAPL",  "NVIDIA":          "NVDA",
+    "Microsoft":        "MSFT",  "Alphabet":        "GOOGL",
+    "Amazon":           "AMZN",  "Meta":            "META",
+    "Tesla":            "TSLA",  "Broadcom":        "AVGO",
+    "AMD":              "AMD",   "TSMC ADR":        "TSM",
+    "Oracle":           "ORCL",  "Salesforce":      "CRM",
+    "Adobe":            "ADBE",  "ServiceNow":      "NOW",
+    "Palantir":         "PLTR",  "CrowdStrike":     "CRWD",
+    "Palo Alto":        "PANW",  "Snowflake":       "SNOW",
+    # ── 금융 ─────────────────────────────────────────────────────
+    "Berkshire B":      "BRK-B", "JPMorgan":        "JPM",
+    "Visa":             "V",     "Mastercard":      "MA",
+    "Bank of America":  "BAC",   "Goldman Sachs":   "GS",
+    "Morgan Stanley":   "MS",    "Wells Fargo":     "WFC",
+    "American Express": "AXP",   "BlackRock":       "BLK",
+    # ── 헬스케어 ─────────────────────────────────────────────────
+    "Eli Lilly":        "LLY",   "UnitedHealth":    "UNH",
+    "Johnson&Johnson":  "JNJ",   "Abbott Labs":     "ABT",
+    "Novo Nordisk":     "NVO",   "Pfizer":          "PFE",
+    "Merck":            "MRK",   "AbbVie":          "ABBV",
+    # ── 소비재 / 필수소비재 ───────────────────────────────────────
+    "Walmart":          "WMT",   "Costco":          "COST",
+    "Procter&Gamble":   "PG",    "Pepsico":         "PEP",
+    "Coca-Cola":        "KO",    "Home Depot":      "HD",
+    "McDonald's":       "MCD",   "Nike":            "NKE",
+    # ── 에너지 ───────────────────────────────────────────────────
+    "Exxon Mobil":      "XOM",   "Chevron":         "CVX",
+    "ConocoPhillips":   "COP",   "NextEra Energy":  "NEE",
+    # ── 통신 / 미디어 ────────────────────────────────────────────
+    "Netflix":          "NFLX",  "Walt Disney":     "DIS",
+    "Comcast":          "CMCSA", "AT&T":            "T",
+    # ── 산업재 ───────────────────────────────────────────────────
+    "Caterpillar":      "CAT",   "Boeing":          "BA",
+    "Lockheed Martin":  "LMT",   "Deere":           "DE",
+    "Honeywell":        "HON",   "RTX":             "RTX",
+}
+
+_sp500_cache: Optional[tuple] = None  # (cached_at: datetime, data: dict)
+
+
+def get_sp500_top20() -> dict:
+    """
+    _SP500_CANDIDATES 중 실시간 시가총액 상위 20개 반환.
+    6시간 인메모리 캐시 적용 — 매 실행 시 API 과호출 방지.
+    """
+    global _sp500_cache
+    now = datetime.now()
+
+    if _sp500_cache:
+        cached_at, cached_data = _sp500_cache
+        if (now - cached_at).total_seconds() < _SP500_CACHE_TTL_SEC:
+            return cached_data
+
+    caps: dict = {}
+    for name, ticker in _SP500_CANDIDATES.items():
+        try:
+            cap = yf.Ticker(ticker).fast_info.market_cap or 0
+            if cap:
+                caps[name] = (ticker, cap)
+        except Exception as e:
+            logger.debug(f"[SP500] {ticker} 시총 조회 실패: {e}")
+
+    top20 = {
+        name: ticker
+        for name, (ticker, _) in sorted(
+            caps.items(), key=lambda x: x[1][1], reverse=True
+        )[:20]
+    }
+    _sp500_cache = (now, top20)
+    logger.info(f"[SP500 Top20] {len(top20)}개 갱신 완료")
+    return top20
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 4. 신규상장(IPO) 자동 편입
+# ═══════════════════════════════════════════════════════════════════
+
+_IPO_WATCHLIST_PATH = Path(__file__).parent / "universe_ipo_watchlist.json"
+
+# universe_ipo_watchlist.json 형식 (예시):
+# [
+#   {"name": "CoreWeave", "ticker": "CRWV", "listed_date": "2025-03-28", "market": "NASDAQ"},
+#   {"name": "Cerebras",  "ticker": "CBRS", "listed_date": "2025-09-10", "market": "NASDAQ"}
+# ]
+
+
+def get_recent_ipos(days: int = 180) -> dict:
+    """
+    universe_ipo_watchlist.json에서 최근 N일 내 상장된 종목 반환.
+    파일이 없으면 빈 딕셔너리 반환 (오류 없이 fallback).
+    """
+    if not _IPO_WATCHLIST_PATH.exists():
+        logger.debug("[IPO] universe_ipo_watchlist.json 없음 — 신규상장 편입 생략")
+        return {}
+
+    try:
+        records = json.loads(_IPO_WATCHLIST_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning(f"[IPO] watchlist 로드 실패: {e}")
+        return {}
+
+    cutoff = datetime.now() - timedelta(days=days)
+    result: dict = {}
+    for item in records:
+        try:
+            if datetime.strptime(item["listed_date"], "%Y-%m-%d") >= cutoff:
+                result[item["name"]] = item["ticker"]
+        except (KeyError, ValueError):
+            continue
+
+    logger.info(f"[IPO] 최근 {days}일 신규상장 {len(result)}개 편입")
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 5. 유동성 급감 감지 → SELL_POOL 자동 편입
+# ═══════════════════════════════════════════════════════════════════
+
+SELL_POOL: dict = {}  # {ticker: detected_date}  — 유동성 급감 종목
+
+_LIQUIDITY_THRESHOLD = 0.3  # 20일 평균 대비 30% 이하 → 급감 판정
+_LIQUIDITY_LOOKBACK  = 3    # 최근 N일 평균으로 비교
+
+
+def check_liquidity_drop(ticker: str) -> bool:
+    """
+    최근 3일 평균 거래량이 20일 평균의 30% 이하이면 True.
+    데이터 부족·API 오류 시 False 반환 (안전 방향).
+    """
+    try:
+        df = yf.download(ticker, period="25d", progress=False, auto_adjust=True)
+        vol = df["Volume"].dropna()
+        if len(vol) < _LIQUIDITY_LOOKBACK + 5:
+            return False
+        avg_20d = float(vol.iloc[:-_LIQUIDITY_LOOKBACK].mean())
+        recent  = float(vol.iloc[-_LIQUIDITY_LOOKBACK:].mean())
+        return avg_20d > 0 and recent < avg_20d * _LIQUIDITY_THRESHOLD
+    except Exception as e:
+        logger.debug(f"[유동성] {ticker} 조회 실패: {e}")
+        return False
+
+
+def update_sell_pool(tickers: list) -> dict:
+    """
+    tickers 목록을 순회해 유동성 급감 종목을 SELL_POOL에 추가.
+    이미 SELL_POOL에 있는 종목은 재검사하지 않음.
+    반환값: 갱신된 SELL_POOL 전체.
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    for ticker in tickers:
+        if ticker in SELL_POOL:
+            continue
+        if check_liquidity_drop(ticker):
+            SELL_POOL[ticker] = today
+            logger.warning(f"[유동성 급감] {ticker} → SELL_POOL 편입 ({today})")
+    return SELL_POOL
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 6. 통합 유니버스 조회
+# ═══════════════════════════════════════════════════════════════════
+
+def get_full_universe(
+    include_kr_index: bool = True,
+    include_sp500_top20: bool = True,
+    include_ipos: bool = True,
+    ipo_days: int = 180,
+) -> dict:
+    """
+    아래 소스를 병합해 {name: ticker} 반환.
+      - 정적 UNIVERSE (중국ETF·미국 anchor)
+      - KOSPI 200 + KOSDAQ 150 (pykrx 동적 조회)
+      - S&P500 시총 상위 20 (동적)
+      - 신규상장 IPO (JSON 파일)
+    중복 티커는 먼저 추가된 이름 우선 유지.
+    SELL_POOL 티커는 결과에서 제외.
+    """
+    merged: dict = {}  # {name: ticker}
+
+    # 미국·중국ETF anchor (정적)
+    for key in ("🇺🇸 미국", "🇨🇳 중국ETF"):
+        merged.update(UNIVERSE.get(key, {}))
+
+    # KOSPI 200 / KOSDAQ 150 (동적 우선, fallback 정적)
+    if include_kr_index:
+        existing = set(merged.values())
+        for name, ticker in get_kospi200().items():
+            if ticker not in existing:
+                merged[name] = ticker
+        existing = set(merged.values())
+        for name, ticker in get_kosdaq150().items():
+            if ticker not in existing:
+                merged[name] = ticker
+
+    # S&P500 시총 상위 20 (동적)
+    if include_sp500_top20:
+        existing = set(merged.values())
+        for name, ticker in get_sp500_top20().items():
+            if ticker not in existing:
+                merged[f"[SP500] {name}"] = ticker
+
+    # 신규상장 IPO
+    if include_ipos:
+        existing = set(merged.values())
+        for name, ticker in get_recent_ipos(days=ipo_days).items():
+            if ticker not in existing:
+                merged[f"[IPO] {name}"] = ticker
+
+    sell_tickers = set(SELL_POOL.keys())
+    return {name: ticker for name, ticker in merged.items() if ticker not in sell_tickers}
+
+
+def get_kr_pools() -> tuple[dict, dict]:
+    """
+    stock_advisor_v4.py용 — KOSPI / KOSDAQ 풀을 분리해서 반환.
+    반환: (kospi_pool, kosdaq_pool)  각각 {name: ticker}
+    """
+    kospi  = get_kospi200()
+    kosdaq = get_kosdaq150()
+
+    sell_tickers = set(SELL_POOL.keys())
+    kospi  = {n: t for n, t in kospi.items()  if t not in sell_tickers}
+    kosdaq = {n: t for n, t in kosdaq.items() if t not in sell_tickers}
+    return kospi, kosdaq
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 7. WATCHLIST — DART 심층 분석 대상 (국내 전용)
+# ═══════════════════════════════════════════════════════════════════
+
+def get_watchlist() -> dict:
+    """
+    DART 심층 분석 대상 종목 코드 반환 ({종목코드: 종목명}).
+    KOSPI200 + KOSDAQ150 동적 조회 우선, 실패 시 정적 fallback.
+    """
+    combined = {**get_kospi200(), **get_kosdaq150()}
+    if not combined:
+        combined = {**UNIVERSE.get("🇰🇷 국내", {}), **UNIVERSE.get("🛡️ 코스닥 방산·보안", {})}
+    return {
+        ticker.replace(".KS", "").replace(".KQ", ""): name
+        for name, ticker in combined.items()
+    }
+
+
+# 정적 fallback — pykrx 미설치 환경에서 dart_collector.py 등 직접 참조 시 사용
 WATCHLIST: dict = {
     ticker.replace(".KS", "").replace(".KQ", ""): name
     for name, ticker in {

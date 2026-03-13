@@ -330,60 +330,107 @@ def get_losers_by_sector(sector: str) -> Dict:
 # 데이터 수집
 # ═══════════════════════════════════════════════════════════════
 
-def fetch_ticker_data(ticker: str) -> dict:
+def fetch_ticker_data(ticker: str, max_retries: int = 2) -> dict:
     """
     단일 티커의 현재가 및 모멘텀 데이터를 수집한다.
+    yfinance 데이터 신뢰성 향상을 위해:
+      - 2d 기간으로 최근 데이터만 조회 (가장 정확한 종가)
+      - 실패 시 재시도 (최대 2 회)
+      - fast_info 로 현재가 교차 검증
     """
-    try:
-        t = yf.Ticker(ticker)
-        h = t.history(period="60d")
-        if h.empty:
-            return {}
-
-        close = h["Close"]
-        current = close.iloc[-1]
-        prev = close.iloc[-2] if len(close) > 1 else current
-
-        # 모멘텀
-        ret_1d = (current - prev) / prev * 100 if prev > 0 else 0
-        ret_5d = (close.iloc[-1] / close.iloc[-6] - 1) * 100 if len(close) > 5 else 0
-        ret_20d = (close.iloc[-1] / close.iloc[-21] - 1) * 100 if len(close) > 20 else 0
-
-        # 기술적 지표
-        ma5 = close.rolling(5).mean().iloc[-1]
-        ma20 = close.rolling(20).mean().iloc[-1] if len(close) >= 20 else current
-        ma60 = close.rolling(60).mean().iloc[-1] if len(close) >= 60 else current
-
-        # RSI
-        delta = close.diff()
-        gain = delta.clip(lower=0).rolling(14).mean()
-        loss = (-delta.clip(upper=0)).rolling(14).mean()
-        rsi = 100 - 100 / (1 + gain.iloc[-1] / (loss.iloc[-1] + 1e-9))
-
-        # 정보
-        info = t.info
-        market_cap = info.get("marketCap", 0)
-        pe = info.get("trailingPE")
-        pb = info.get("priceToBook")
-
-        return {
-            "ticker": ticker,
-            "price": round(float(current), 2),
-            "change_1d": round(float(ret_1d), 2),
-            "change_5d": round(float(ret_5d), 2),
-            "change_20d": round(float(ret_20d), 2),
-            "ma5": round(float(ma5), 2),
-            "ma20": round(float(ma20), 2),
-            "ma60": round(float(ma60), 2),
-            "rsi": round(float(rsi), 1),
-            "market_cap": market_cap,
-            "pe": round(float(pe), 1) if pe else None,
-            "pb": round(float(pb), 2) if pb else None,
-            "collected_at": datetime.datetime.now().isoformat(),
-        }
-    except Exception as e:
-        print(f"  [오류] {ticker}: {e}")
-        return {}
+    for attempt in range(max_retries + 1):
+        try:
+            t = yf.Ticker(ticker)
+            
+            # 1. 최근 2 일 데이터로 정확한 종가 확인 (가장 신뢰성 높음)
+            h = t.history(period="2d", interval="1d")
+            if h is None or h.empty or "Close" not in h.columns:
+                raise ValueError("유효한 가격 데이터 없음")
+            
+            close = h["Close"].dropna()
+            if len(close) == 0:
+                raise ValueError("종가 데이터 없음")
+            
+            current = float(close.iloc[-1])
+            
+            # 2. fast_info 로 현재가 교차 검증 (선택적)
+            try:
+                fast_price = t.fast_info.get("lastPrice", current)
+                # 5% 이상 차이 나면 경고 (데이터 신뢰성 문제)
+                if abs(fast_price - current) / current > 0.05:
+                    print(f"  ⚠️ {ticker} 가격 차이: history={current:.2f}, fast={fast_price:.2f}")
+            except Exception:
+                pass  # fast_info 실패 시 history 데이터 사용
+            
+            # 3. 과거 데이터 재조회 (모멘텀 계산용)
+            if attempt == 0:
+                try:
+                    h_long = t.history(period="65d", interval="1d")
+                    if h_long is not None and not h_long.empty and "Close" in h_long.columns:
+                        h = h_long
+                        close = h["Close"].dropna()
+                except Exception:
+                    pass  # 실패 시 짧은 데이터로 계속
+            
+            # 데이터 충분성 체크
+            if len(close) < 2:
+                raise ValueError("데이터 부족 (2 일 미만)")
+            
+            prev = float(close.iloc[-2])
+            
+            # 모멘텀 계산
+            ret_1d = (current - prev) / prev * 100 if prev > 0 else 0
+            ret_5d = (close.iloc[-1] / close.iloc[-6] - 1) * 100 if len(close) > 5 else 0
+            ret_20d = (close.iloc[-1] / close.iloc[-21] - 1) * 100 if len(close) > 20 else 0
+            
+            # 기술적 지표
+            ma5 = float(close.rolling(5).mean().iloc[-1])
+            ma20 = float(close.rolling(20).mean().iloc[-1]) if len(close) >= 20 else current
+            ma60 = float(close.rolling(60).mean().iloc[-1]) if len(close) >= 60 else current
+            
+            # RSI
+            delta = close.diff()
+            gain = delta.clip(lower=0).rolling(14).mean()
+            loss = (-delta.clip(upper=0)).rolling(14).mean()
+            rsi = 100 - 100 / (1 + gain.iloc[-1] / (loss.iloc[-1] + 1e-9))
+            
+            # 정보 (1 회만 시도)
+            market_cap = pe = pb = None
+            if attempt == 0:
+                try:
+                    info = t.info
+                    market_cap = info.get("marketCap", 0)
+                    pe = info.get("trailingPE")
+                    pb = info.get("priceToBook")
+                except Exception:
+                    pass
+            
+            return {
+                "ticker": ticker,
+                "price": round(float(current), 2),
+                "change_1d": round(float(ret_1d), 2),
+                "change_5d": round(float(ret_5d), 2),
+                "change_20d": round(float(ret_20d), 2),
+                "ma5": round(ma5, 2),
+                "ma20": round(ma20, 2),
+                "ma60": round(ma60, 2),
+                "rsi": round(float(rsi), 1),
+                "market_cap": market_cap,
+                "pe": round(float(pe), 1) if pe else None,
+                "pb": round(float(pb), 2) if pb else None,
+                "collected_at": datetime.datetime.now().isoformat(),
+            }
+            
+        except Exception as e:
+            if attempt < max_retries:
+                print(f"  [재시도] {ticker}: {e} ({attempt + 1}/{max_retries})")
+                import time
+                time.sleep(1)  # 1 초 대기 후 재시도
+            else:
+                print(f"  [오류] {ticker}: {e} (최대 재시도 초과)")
+                return {}
+    
+    return {}
 
 
 def collect_all_losers_data() -> list:

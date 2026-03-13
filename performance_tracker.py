@@ -242,12 +242,17 @@ def update_price_tracking(target_date: str = None):
             if df.empty or len(df) < 2:
                 continue
             
+            # yfinance 1.x: 단일 ticker도 Close가 DataFrame으로 반환될 수 있음
+            close_col = df['Close']
+            if isinstance(close_col, pd.DataFrame):
+                close_col = close_col.iloc[:, 0]
+
             # 일별 수익률 계산 (최대 20 일)
             for day_after in [1, 3, 5, 10, 20]:
                 if len(df) <= day_after:
                     continue
-                
-                close_price = float(df['Close'].iloc[day_after])
+
+                close_price = float(close_col.iloc[day_after])
                 return_pct = ((close_price - initial_price) / initial_price) * 100
                 
                 cursor.execute('''
