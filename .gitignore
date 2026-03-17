@@ -46,6 +46,9 @@ Scripts/
 cache/
 nul
 
+# 실행 결과물 (리포트)
+report*.html
+
 # 실행 결과물 (txt 리포트)
 report*.txt
 ark_report_*.txt
