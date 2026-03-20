@@ -122,12 +122,66 @@ UNIVERSE: dict = {
     # ─── 중국ETF (KRX 상장 — 한국 증권사 판매 상품만) ──────────────
     # 개별 중국 ADR(BABA·JD 등) 및 홍콩 직상장 종목은 포함하지 않음
     "🇨🇳 중국ETF": {
-        "TIGER 차이나CSI300":     "192090.KS",
-        "KODEX 차이나H주":        "099140.KS",
-        "TIGER 차이나전기차":     "305540.KS",
-        "KODEX 차이나항셍테크":   "371160.KS",
-        "KINDEX 중국본토CSI300":  "168580.KS",
-        "KODEX 차이나CSI300합성": "310080.KS",
+        # 기존 6개
+        "TIGER 차이나CSI300":       "192090.KS",  # 중국 A주 대형 300 벤치마크
+        "KODEX 차이나H주":          "099140.KS",  # 홍콩 H주 블루칩
+        "TIGER 차이나전기차":       "305540.KS",  # BYD·CATL 등 EV 밸류체인
+        "KODEX 차이나항셍테크":     "371160.KS",  # 텐센트·알리바바 등 홍콩 테크
+        "KINDEX 중국본토CSI300":    "168580.KS",  # CSI300 본토 합성
+        "KODEX 차이나CSI300합성":   "310080.KS",  # CSI300 SWAP 합성
+        # 추가 6개 (확장 풀)
+        "TIGER 차이나CSI500":       "192720.KS",  # 중국 중소형 성장주 500
+        "TIGER 차이나항셍H주":      "152280.KS",  # 홍콩 항셍 H주 25 블루칩
+        "ACE 중국본토CSI300":       "420330.KS",  # 한화자산 중국본토 CSI300
+        "KODEX 차이나과창판STAR50합성": "391600.KS", # 상하이 과학혁신판 STAR50
+        "TIGER 차이나소비테마":     "290130.KS",  # 중국 내수 소비 섹터
+        "KBSTAR 중국본토대형주CSI100": "304850.KS", # CSI100 대형주 집중
+    },
+
+    # ─── 국내 섹터·테마 ETF (KRX 상장) ──────────────────────────────
+    "🇰🇷 국내 ETF": {
+        "KODEX 반도체":           "091160.KS",
+        "KODEX 2차전지산업":      "305720.KS",
+        "TIGER 원자력테마":       "381180.KS",
+        "KODEX 헬스케어":         "266410.KS",
+        "KODEX 에너지화학":       "117460.KS",
+        "TIGER AI반도체핵심공정": "396520.KS",
+        "TIGER K방산":            "457400.KS",
+        "TIGER 조선TOP10":        "466920.KS",
+        "KODEX 은행":             "091170.KS",
+        "TIGER 미디어컨텐츠":     "227550.KS",
+    },
+
+    # ─── 코스닥 테마주 (반도체장비·2차전지·바이오·우주방산) ──────────
+    "🇰🇷 코스닥 테마": {
+        # 반도체 장비·소재
+        "리노공업":     "058470.KQ",  "이오테크닉스": "039030.KQ",
+        "원익IPS":      "240810.KQ",  "피에스케이":   "319660.KQ",
+        "하나마이크론": "067310.KQ",  "나노신소재":   "121600.KQ",
+        # 2차전지 소재
+        "엘앤에프":     "066970.KQ",  "천보":         "278280.KQ",
+        "솔브레인":     "357780.KQ",  "동화기업":     "025900.KQ",
+        # 바이오·헬스케어
+        "HLB":          "028300.KQ",  "알테오젠":     "196170.KQ",
+        "파마리서치":   "214450.KQ",  "에이비엘바이오": "298380.KQ",
+        "리가켐바이오": "141080.KQ",
+        # 우주·방산
+        "이노스페이스": "462350.KQ",  "비에이치아이": "083650.KQ",
+        "퍼스텍":       "010820.KQ",
+    },
+
+    # ─── 코스피 테마주 (에너지·방산·전력기기·조선) ───────────────────
+    "🇰🇷 코스피 테마": {
+        # 에너지·정유
+        "S-Oil":          "010950.KS",  "GS":             "078930.KS",
+        # 방산·조선
+        "HD현대중공업":   "329180.KS",  "현대로템":       "064350.KS",
+        "풍산":           "103140.KS",  "한화시스템":     "272210.KS",
+        # 전력기기·원전
+        "HD현대일렉트릭": "267260.KS",  "LS일렉트릭":     "010120.KS",
+        "효성중공업":     "298040.KS",  "두산밥캣":       "241560.KS",
+        # 헬스케어
+        "유한양행":       "000100.KS",  "종근당":         "185750.KS",
     },
 }
 
@@ -298,6 +352,48 @@ _IPO_WATCHLIST_PATH = Path(__file__).parent / "universe_ipo_watchlist.json"
 # ]
 
 
+def get_recent_kr_ipos_auto(days: int = 180) -> dict:
+    """
+    FinanceDataReader KRX-DESC 에서 ListingDate 기준 최근 N일 내 상장 종목 반환.
+    SPAC, ETN, KONEX, 리츠 등 제외 — 일반 주식만 포함.
+    반환: {종목명: 티커(XXXXXX.KS or .KQ)}
+    """
+    try:
+        import FinanceDataReader as fdr
+        import pandas as pd
+        import re
+
+        df = fdr.StockListing("KRX-DESC")
+        df["ListingDate"] = pd.to_datetime(df["ListingDate"], errors="coerce")
+        cutoff = datetime.now() - timedelta(days=days)
+        recent = df[df["ListingDate"] >= cutoff].copy()
+
+        # KOSPI / KOSDAQ 만 (KONEX 제외)
+        recent = recent[recent["Market"].isin(["KOSPI", "KOSDAQ"])]
+        # SPAC / ETN 코드 패턴 제외 (0으로 시작하는 코드)
+        recent = recent[~recent["Code"].astype(str).str.startswith("0")]
+        # 이름 기반 SPAC 필터
+        recent = recent[~recent["Name"].str.contains(
+            r"스팩|SPAC|호$|호스팩|리츠|REIT", case=False, na=False, regex=True
+        )]
+
+        result: dict = {}
+        for _, row in recent.iterrows():
+            code = str(row["Code"]).zfill(6)
+            name = str(row["Name"])
+            suffix = ".KS" if row["Market"] == "KOSPI" else ".KQ"
+            result[name] = f"{code}{suffix}"
+
+        logger.info(f"[IPO-FDR] 최근 {days}일 KRX 신규상장 {len(result)}개 탐지")
+        return result
+    except ImportError:
+        logger.warning("[IPO-FDR] FinanceDataReader 미설치 — 자동 IPO 탐지 생략")
+        return {}
+    except Exception as e:
+        logger.warning(f"[IPO-FDR] KRX-DESC 조회 실패: {e}")
+        return {}
+
+
 def get_recent_ipos(days: int = 180) -> dict:
     """
     universe_ipo_watchlist.json에서 최근 N일 내 상장된 종목 반환.
@@ -329,6 +425,13 @@ def get_recent_ipos(days: int = 180) -> dict:
 # ═══════════════════════════════════════════════════════════════════
 # 5. 유동성 급감 감지 → SELL_POOL 자동 편입
 # ═══════════════════════════════════════════════════════════════════
+
+# 상장폐지·데이터 없음 확인 종목 — 동적 풀에서 영구 제외
+DELIST_BLACKLIST: set = {
+    "068670.KS",   # 상장폐지 확인
+    "426260.KQ",   # 상장폐지 확인
+    "457400.KS",   # TIGER K방산 — yfinance 데이터 없음
+}
 
 SELL_POOL: dict = {}  # {ticker: detected_date}  — 유동성 급감 종목
 
@@ -391,8 +494,8 @@ def get_full_universe(
     """
     merged: dict = {}  # {name: ticker}
 
-    # 미국·중국ETF anchor (정적)
-    for key in ("🇺🇸 미국", "🇨🇳 중국ETF"):
+    # 미국·중국ETF anchor + 국내 ETF/테마 (정적)
+    for key in ("🇺🇸 미국", "🇨🇳 중국ETF", "🇰🇷 국내 ETF", "🇰🇷 코스피 테마", "🇰🇷 코스닥 테마"):
         merged.update(UNIVERSE.get(key, {}))
 
     # KOSPI 200 / KOSDAQ 150 (동적 우선, fallback 정적)
@@ -420,21 +523,30 @@ def get_full_universe(
             if ticker not in existing:
                 merged[f"[IPO] {name}"] = ticker
 
-    sell_tickers = set(SELL_POOL.keys())
-    return {name: ticker for name, ticker in merged.items() if ticker not in sell_tickers}
+    exclude = set(SELL_POOL.keys()) | DELIST_BLACKLIST
+    return {name: ticker for name, ticker in merged.items() if ticker not in exclude}
 
 
 def get_kr_pools() -> tuple[dict, dict]:
     """
     stock_advisor_v4.py용 — KOSPI / KOSDAQ 풀을 분리해서 반환.
     반환: (kospi_pool, kosdaq_pool)  각각 {name: ticker}
+    정적 테마·ETF 종목을 동적 풀에 병합.
     """
     kospi  = get_kospi200()
     kosdaq = get_kosdaq150()
 
-    sell_tickers = set(SELL_POOL.keys())
-    kospi  = {n: t for n, t in kospi.items()  if t not in sell_tickers}
-    kosdaq = {n: t for n, t in kosdaq.items() if t not in sell_tickers}
+    # 정적 테마/ETF 보강
+    for name, ticker in {**UNIVERSE.get("🇰🇷 국내 ETF", {}), **UNIVERSE.get("🇰🇷 코스피 테마", {})}.items():
+        if ticker not in kospi.values():
+            kospi[name] = ticker
+    for name, ticker in UNIVERSE.get("🇰🇷 코스닥 테마", {}).items():
+        if ticker not in kosdaq.values():
+            kosdaq[name] = ticker
+
+    exclude = set(SELL_POOL.keys()) | DELIST_BLACKLIST
+    kospi  = {n: t for n, t in kospi.items()  if t not in exclude}
+    kosdaq = {n: t for n, t in kosdaq.items() if t not in exclude}
     return kospi, kosdaq
 
 

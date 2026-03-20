@@ -79,6 +79,12 @@
 - [x] 2026-03-13 | Phase 5-1: IPO 자동 편입 — `fetch_kr_new_listings()` + `update_ipo_watchlist()` + CLI `python universe_utils.py ipo` | `universe_utils.py`
 - [x] 2026-03-13 | Phase 5-1: S&P500 후보 풀 확장 — 30개 → 58개 (섹터별 분류: AI·금융·헬스·소비재·에너지·통신·산업재) | `universe.py`
 - [x] 2026-03-13 | Phase 5-1: 테마별 실행 옵션 — `--theme [all|ai|defense|bio|energy|finance|kr|us]` CLI 인수, `_THEMES` + `run_screening` 오버라이드 | `stock_advisor_v4.py`
+- [x] 2026-03-19 | `score_technical()`에 MACD+ADX 복합 추세 점수 블록 추가 (0~+10) — ADX>25·+DI>-DI·MACD골든크로스 삼중 확인 | `stock_advisor_v4.py`
+- [x] 2026-03-19 | `screen_one()` 결과 dict에 `macd_adx_score` 필드 추가 (0~10, 리포트 투명도 향상) | `stock_advisor_v4.py`
+- [x] 2026-03-19 | `plan.md` 종목 선정 필터 원칙 섹션 신규 추가 — 기술적(MACD골든크로스+ADX>25) / 기본적(EBITDA성장률>10%+비지배지분>0) 필터 철학 명시 | `plan.md`
+- [x] 2026-03-19 | `plan.md` 통합 스코어 구성 테이블에 MACD+ADX 복합 점수 및 EBITDA·비지배지분 항목 반영 | `plan.md`
+- [x] 2026-03-19 | `plan.md` 3단계 투자 프레임워크 섹션 신규 추가 — Step1(Quality: ROE>15%·이자보상배율>3·비지배지분>0) / Step2(Valuation: DCF 30%저평가·역발상 지표) / Step3(Timing: 주봉MACD전환+ADX>25) | `plan.md`
+- [x] 2026-03-19 | `workflow.md` 3단계 프레임워크를 STEP별 상세에 반영 (STEP 2 Valuation, STEP 3 Timing) | `workflow.md`
 
 ---
 
@@ -519,3 +525,218 @@ REM 결과는 logs\dryrun_YYYYMMDD.log 에 저장됨
 - [ ] 최초 실전 주문: 1주 단위 소액 테스트 (계좌의 1%)
 - [ ] 주문 로그 `stock_performance.db` 저장 확인
 - [ ] 2주 검증 후 포지션 한도 단계적 확대 (1% → 3% → 5%)
+ 
+
+---
+
+## 10. 시스템 건강도 모니터링 (Phase 6)
+
+### 건강도 점수 확인
+
+```batch
+REM 건강도 점수 출력 (Phase 6 구현 후)
+%PY% -c "from health_monitor import HealthMonitor; print(HealthMonitor().get_score())"
+```
+
+### 건강도 등급별 대응
+
+| 등급 | 점수 | 대응 |
+|------|------|------|
+| 🟢 우수 | 80~100 | 정상 운영 |
+| 🟡 주의 | 60~79 | 로그 확인, 일부 기능 점검 |
+| 🔴 위험 | 40~59 | 즉시 점검, API 키 확인 |
+| ⚫ 심각 | 0~39 | 비상 연락, 시스템 복구 |
+
+---
+
+## 11. 고급 트러블슈팅
+
+### Claude API 토큰 초과
+
+```
+증상: `400 Bad Request` 또는 `context_length_exceeded`
+해결:
+  1. `stock_advisor_v4.py` 에서 `_MAX_PROMPT_CHARS` 확인 (기본 28,000)
+  2. `--theme` 옵션으로 종목 수 축소 (예: `--theme ai`)
+  3. Claude 캐시 삭제 후 재실행: `del /q "cache\*.json"`
+```
+
+### yfinance 503 에러 (Rate Limit)
+
+```
+증상: `HTTPError: 503 Service Unavailable`
+해결:
+  1. Semaphore 값 확인 (기본 8)
+  2. `time.sleep(1)` inserted between requests
+  3. 캐시 활용: 동일 날짜 재실행 시 캐시 히트
+  4. 60 초 대기 후 재시도
+```
+
+### DB 잠금 오류
+
+```
+증상: `sqlite3.OperationalError: database is locked`
+해결:
+  1. 다른 프로세스에서 DB 사용 중인지 확인
+  2. `stock_performance.db-shm`, `-wal` 파일 삭제
+  3. SQLite WAL 모드 확인: `PRAGMA journal_mode;`
+```
+
+### 스트리mlit 대시보드 실행 오류
+
+```
+증상: `Port 8501 already in use`
+해결:
+  1. 사용 중인 포트 확인: `netstat -ano | findstr :8501`
+  2. 프로세스 종료: `taskkill /PID <PID> /F`
+  3. 또는 다른 포트 사용: `streamlit run dashboard.py --server.port 8502`
+```
+
+### 텔레그램 알림 미수신
+
+```
+증상: 텔레그램 알림이 오지 않음
+해결:
+  1. `TELEGRAM_BOT_TOKEN` 유효성 확인
+  2. `TELEGRAM_CHAT_ID` 확인 (BotFather 에서 확인)
+  3. 테스트 발송: `%PY% test_telegram.py`
+  4. 봇 차단 여부 확인: 봇과 대화 시작
+```
+
+---
+
+## 12. 성능 최적화 팁
+
+### 수집 시간 단축
+
+```batch
+REM 테마별 선택 실행 (전체 대신)
+%PY% stock_advisor_v4.py --theme ai      # AI·반도체만
+%PY% stock_advisor_v4.py --theme defense # 방산·우주만
+
+REM 병렬 처리 수 조정 (기본 8)
+set YF_SEMAPHORE=12
+%PY% stock_advisor_v4.py
+```
+
+### 메모리 사용량 감소
+
+```batch
+REM 캐시 삭제 후 실행
+del /q "cache\*.json"
+%PY% stock_advisor_v4.py
+
+REM 프로파일링 모드 (오버헤드 있음)
+%PY% stock_advisor_v4.py --profile
+```
+
+---
+
+## 13. 백업·복구 가이드
+
+### 일일 백업 스크립트
+
+```batch
+@echo off
+set BACKUP_DIR=C:\Users\geunho\stock analysis\backups
+set DATE=%DATE:~0,4%%DATE:~5,2%%DATE:~8,2%
+mkdir "%BACKUP_DIR%\%DATE%" 2>nul
+xcopy /Y /I cache "%BACKUP_DIR%\%DATE%\cache"
+xcopy /Y /I logs "%BACKUP_DIR%\%DATE%\logs"
+copy /Y stock_performance.db "%BACKUP_DIR%\%DATE%\"
+echo Backup completed: %DATE%
+```
+
+### DB 복구
+
+```batch
+REM 백업 DB 로 복원
+copy /Y "backups\20260319\stock_performance.db" .
+```
+
+### 캐시 복구
+
+```batch
+REM 특정 날짜 캐시 복원
+xcopy /Y "backups\20260319\cache\*" cache\
+```
+
+---
+
+## 14. 로그 분석 유틸리티
+
+### 일일 로그 요약
+
+```batch
+REM 오늘 로그에서 오류만 추출
+findstr "ERROR" "logs\daily_%DATE:~0,4%%DATE:~5,2%%DATE:~8,2%.log"
+
+REM 실행 시간 추출
+findstr "elapsed" "logs\daily_*.log" | tail -1
+```
+
+### 건강도 로그 분석
+
+```powershell
+# 건강도 점수 추이 (Phase 6 구현 후)
+Get-Content "logs\health_*.log" | Select-String "score" | Out-File health_trend.txt
+```
+
+### 에러 통계
+
+```powershell
+# 일별 에러 건수
+Get-ChildItem "logs\*.log" | ForEach-Object {
+    $errors = Select-String "ERROR" $_.FullName
+    [PSCustomObject]@{
+        Date = $_.LastWriteTime.Date
+        Errors = $errors.Count
+    }
+} | Export-Csv error_stats.csv
+```
+
+---
+
+## 15. 실전 주문 최종 체크리스트
+
+> 실전 주문 활성화 전 **반드시** 모든 항목을 확인하세요.
+
+### 사전 점검 (매일 장전)
+
+- [ ] 건강도 점수 80 이상
+- [ ] 어제 에러 로그에서 `ERROR` 0 건
+- [ ] `.env` 에서 `KIS_ENV=vts` (가상) 또는 `prod` (실전) 확인
+- [ ] 계좌 잔고 충분 확인
+- [ ] 장중 시간 확인 (09:00~15:30)
+
+### 주문 후 점검
+
+- [ ] 주문 로그 `stock_performance.db` 저장 확인
+- [ ] 체결 내역 조회 (KIS 앱 또는 HTS)
+- [ ] 잔고 업데이트 확인
+- [ ] 손절가·목표가 설정 확인
+
+### 비상 연락망
+
+| 역할 | 연락처 | 비고 |
+|------|--------|------|
+| 시스템 관리자 | geunho@stic.co.kr | 이메일 |
+| 긴급 연락 (문자) | 010-XXXX-XXXX | SMS 알림 |
+| 증권사 고객센터 | 1588-XXXX | 주문 장애 시 |
+
+---
+
+## 16. 용어 정리
+
+| 용어 | 설명 |
+|------|------|
+| **유니버스** | 스크리닝 대상 종목 집합 |
+| **스코어링** | 종목별 통합 점수 계산 (100 점 만점) |
+| **ATR** | Average True Range, 변동성 기반 손절가 계산 |
+| **Citrini** | 리스크 종목 필터링 리스트 |
+| **Dry Run** | 실제 주문 없이 신호만 발생시키는 테스트 |
+| **HARD-GATE** | 실전 전환 필수 조건 (승률 55%+, MDD 10% 이하) |
+| **PIT** | Point-in-Time, 백테스트 시 미래 데이터 참조 차단 |
+| **LAB** | Look-ahead Bias, 미래 데이터 오류 참조 |
+| **건강도** | 시스템 정상 운영 점수 (100 점 만점) |
+| **2FA** | 2 단계 인증, 실전 주문 보안 |

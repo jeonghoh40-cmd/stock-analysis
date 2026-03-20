@@ -36,7 +36,9 @@ import pandas as pd
 import numpy as np
 import feedparser
 from dotenv import dotenv_values
-from universe import get_kr_pools, UNIVERSE
+from universe import (get_kr_pools, UNIVERSE,
+                       get_recent_kr_ipos_auto, get_recent_ipos,
+                       SELL_POOL, DELIST_BLACKLIST)
 import data_cleaner
 from broker_news_collector import get_broker_picks
 
@@ -71,6 +73,7 @@ TELEGRAM_CHAT_ID   = _get("TELEGRAM_CHAT_ID")
 # ═══════════════════════════════════════════════════════════════
 
 US_POOL = {
+    # ── 빅테크 / AI ─────────────────────────────────────────────────
     "Apple":             "AAPL",  "NVIDIA":          "NVDA",
     "Microsoft":         "MSFT",  "Alphabet":        "GOOGL",
     "Amazon":            "AMZN",  "Meta":            "META",
@@ -85,14 +88,46 @@ US_POOL = {
     "Palantir":          "PLTR",  "Datadog":         "DDOG",
     "ServiceNow":        "NOW",   "Workday":         "WDAY",
     "Uber":              "UBER",  "Shopify":         "SHOP",
+    # ── AI 인프라·반도체 테마 ────────────────────────────────────────
+    "ARM Holdings":      "ARM",   "Marvell":         "MRVL",
+    "Super Micro":       "SMCI",  "Vertiv":          "VRT",
+    "ASML":              "ASML",  "Arista Networks": "ANET",
+    # ── 금융 ─────────────────────────────────────────────────────────
     "Visa":              "V",     "Mastercard":      "MA",
     "JPMorgan":          "JPM",   "Goldman Sachs":   "GS",
-    "Berkshire B":       "BRK-B", "Johnson&Johnson": "JNJ",
-    "Eli Lilly":         "LLY",   "UnitedHealth":    "UNH",
+    "Berkshire B":       "BRK-B", "Bank of America": "BAC",
+    "Wells Fargo":       "WFC",   "Schwab":          "SCHW",
+    "Blackrock":         "BLK",
+    # ── 헬스케어 ─────────────────────────────────────────────────────
+    "Johnson&Johnson":   "JNJ",   "Eli Lilly":       "LLY",
+    "UnitedHealth":      "UNH",   "Pfizer":          "PFE",
+    "Novo Nordisk":      "NVO",
+    # ── 에너지 테마 ──────────────────────────────────────────────────
     "Exxon Mobil":       "XOM",   "Chevron":         "CVX",
-    "Boeing":            "BA",    "Lockheed Martin": "LMT",
-    "Caterpillar":       "CAT",   "Walmart":         "WMT",
-    "Costco":            "COST",  "Walt Disney":     "DIS",
+    "ConocoPhillips":    "COP",   "Occidental":      "OXY",
+    "Devon Energy":      "DVN",   "Diamondback":     "FANG",
+    "Valero Energy":     "VLO",   "Phillips 66":     "PSX",
+    "Halliburton":       "HAL",
+    # ── 방산 테마 ────────────────────────────────────────────────────
+    "Lockheed Martin":   "LMT",   "RTX":             "RTX",
+    "Northrop Grumman":  "NOC",   "General Dynamics": "GD",
+    "Boeing":            "BA",    "L3Harris":        "LHX",
+    # ── 원전·전력 테마 ───────────────────────────────────────────────
+    "Constellation Egy": "CEG",   "Vistra Energy":   "VST",
+    "Cameco":            "CCJ",   "NRG Energy":      "NRG",
+    "NextEra Energy":    "NEE",
+    # ── 소비재·산업재 ────────────────────────────────────────────────
+    "Walmart":           "WMT",   "Costco":          "COST",
+    "Caterpillar":       "CAT",   "Walt Disney":     "DIS",
+    # ── 미국 섹터 ETF ────────────────────────────────────────────────
+    "ETF-에너지 XLE":    "XLE",   "ETF-기술 XLK":    "XLK",
+    "ETF-금융 XLF":      "XLF",   "ETF-헬스케어 XLV":"XLV",
+    "ETF-산업재 XLI":    "XLI",   "ETF-필수소비 XLP":"XLP",
+    "ETF-유틸리티 XLU":  "XLU",   "ETF-소재 XLB":    "XLB",
+    # ── 테마 ETF ─────────────────────────────────────────────────────
+    "ETF-반도체 SMH":    "SMH",   "ETF-방산 ITA":    "ITA",
+    "ETF-금 GLD":        "GLD",   "ETF-원유 USO":    "USO",
+    "ETF-나스닥 QQQ":    "QQQ",   "ETF-혁신 ARKK":   "ARKK",
 }
 
 RECOMMEND_COUNT = {"KOSPI": 5, "KOSDAQ": 3, "US": 5}
@@ -260,6 +295,18 @@ def score_technical(rsi, macd_hist, price, ma5, ma20, ma60, mom5,
     elif adx < 15:
         s = int(s * 0.8)  # 횡보 시 신호 20% 감쇠
 
+    # ── MACD+ADX 복합 추세 점수 (0~+10) ──────────────────────────
+    # 추세 강도(ADX) + 방향(+DI/-DI) + 타이밍(MACD 골든크로스) 삼중 확인
+    # macd_hist > 0 ↔ MACD > Signal (골든크로스/유지 상태)
+    macd_adx = 0
+    if adx > 25:
+        macd_adx += 2                        # 강한 추세
+        if plus_di > minus_di:
+            macd_adx += 3                    # 상승 추세 방향
+    if macd_hist > 0:
+        macd_adx += 5                        # MACD 골든크로스/유지
+    s += macd_adx
+
     # OBV 추세 (±5)
     if   obv_trend >  0.05: s +=  5
     elif obv_trend < -0.05: s -=  5
@@ -328,6 +375,83 @@ def score_with_investor_weight(ticker: str, base_score: int) -> int:
 
 
 # ═══════════════════════════════════════════════════════════════
+# 거시 레짐 평가 — 시장 국면에 따라 전 종목 점수 보정
+# ═══════════════════════════════════════════════════════════════
+
+def compute_macro_regime(macro: dict, fear_greed: dict, sector_flows: dict) -> dict:
+    """
+    VIX · Fear&Greed · 주요 지수 5일 모멘텀 기반으로 현재 시장 국면을 평가.
+
+    Returns:
+        regime          : "강세" | "중립" | "약세" | "극도약세"
+        regime_score    : 내부 점수 (양수=강세, 음수=약세)
+        score_adjustment: 전 종목 점수에 가감할 값 (약세 → 음수)
+        reasons         : 판단 근거 리스트
+    """
+    score = 0
+    reasons = []
+
+    # ── VIX ──────────────────────────────────────────────────────
+    vix = macro.get("VIX", {}).get("현재", 20)
+    if vix < 15:
+        score += 10; reasons.append(f"VIX {vix:.1f} (저변동·강세)")
+    elif vix < 20:
+        score += 4;  reasons.append(f"VIX {vix:.1f} (정상)")
+    elif vix < 25:
+        score -= 6;  reasons.append(f"VIX {vix:.1f} (경계)")
+    elif vix < 30:
+        score -= 12; reasons.append(f"VIX {vix:.1f} (위험)")
+    else:
+        score -= 20; reasons.append(f"VIX {vix:.1f} (극도위험)")
+
+    # ── Fear & Greed ─────────────────────────────────────────────
+    fg = fear_greed.get("지수", 50) if fear_greed else 50
+    if fg < 25:
+        score += 6;  reasons.append(f"F&G {fg} (극도공포→역발상매수)")
+    elif fg < 40:
+        score -= 4;  reasons.append(f"F&G {fg} (공포)")
+    elif fg > 75:
+        score -= 5;  reasons.append(f"F&G {fg} (극도탐욕→과열)")
+    elif fg > 60:
+        score += 2;  reasons.append(f"F&G {fg} (탐욕·주의)")
+
+    # ── 주요 지수 5일 등락 ────────────────────────────────────────
+    sp500_chg = macro.get("S&P500", {}).get("등락(%)", 0)
+    kospi_chg = macro.get("KOSPI",  {}).get("등락(%)", 0)
+
+    if sp500_chg < -5:
+        score -= 12; reasons.append(f"S&P500 {sp500_chg:+.1f}% (급락)")
+    elif sp500_chg < -2:
+        score -= 6;  reasons.append(f"S&P500 {sp500_chg:+.1f}% (하락)")
+    elif sp500_chg > 3:
+        score += 5;  reasons.append(f"S&P500 {sp500_chg:+.1f}% (강세)")
+
+    if kospi_chg < -3:
+        score -= 6;  reasons.append(f"KOSPI {kospi_chg:+.1f}% (급락)")
+    elif kospi_chg < -1:
+        score -= 3;  reasons.append(f"KOSPI {kospi_chg:+.1f}% (하락)")
+    elif kospi_chg > 2:
+        score += 3;  reasons.append(f"KOSPI {kospi_chg:+.1f}% (강세)")
+
+    # ── 레짐 판단 및 점수 보정 ────────────────────────────────────
+    if score >= 10:
+        regime = "강세";    adj = +5
+    elif score >= 2:
+        regime = "중립";    adj = 0
+    elif score >= -8:
+        regime = "약세";    adj = -8
+    else:
+        regime = "극도약세"; adj = -15
+
+    return {
+        "regime":          regime,
+        "regime_score":    score,
+        "score_adjustment": adj,
+        "reasons":         reasons,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════
 # 단일 종목 고속 스크리닝 (신규 지표 포함)
 # ═══════════════════════════════════════════════════════════════
 # Lock → Semaphore: 최대 8개 병렬 다운로드 허용 (기존 Lock은 사실상 순차 실행)
@@ -340,6 +464,25 @@ def screen_one(market: str, name: str, ticker: str) -> Optional[dict]:
                              progress=False, auto_adjust=True, timeout=10)
         if df is None or df.empty or len(df) < 65:
             return None
+        # 12개월 요청에서 130 거래일 미만 → 약 6개월 이내 상장 추정
+        is_recently_listed = len(df) < 130
+
+        # yfinance v1.x MultiIndex 컬럼 → 단층 컬럼으로 평탄화
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+        # ── 장 중 실행 시 오늘 미확정 행 분리 ──────────────────────────
+        # 기술적 지표는 전일 확정 종가 기반으로 계산하고,
+        # 당일 장중 가격은 별도 필드(today_price/today_chg)로 보관
+        today_price: Optional[float] = None
+        today_chg:   Optional[float] = None
+        if len(df) > 0 and df.index[-1].date() == datetime.date.today():
+            today_raw = float(df["Close"].squeeze().iloc[-1])
+            df = df.iloc[:-1]          # 오늘 행 제거 → 전일 확정 종가 기반 유지
+            if len(df) >= 1:
+                prev_close = float(df["Close"].squeeze().iloc[-1])
+                today_price = today_raw
+                today_chg   = round((today_raw - prev_close) / prev_close * 100, 2)
 
         df = data_cleaner.clean(df, ticker)
         if df is None:
@@ -350,13 +493,13 @@ def screen_one(market: str, name: str, ticker: str) -> Optional[dict]:
         low    = df["Low"].squeeze()
         volume = df["Volume"].squeeze() if "Volume" in df.columns else pd.Series([0]*len(df))
 
-        price = float(close.iloc[-1])
+        price = float(close.iloc[-1])   # 전일 확정 종가
         prev  = float(close.iloc[-2])
         chg   = round((price - prev) / prev * 100, 2)
 
         # ── 기존 지표 ──
         rsi               = _rsi(close)
-        _, _, macd_hist   = _macd(close)
+        macd_line, _, macd_hist = _macd(close)
         ma5, ma20, ma60   = _mas(close)
         mom5              = _mom(close, 5)
         bb_up, bb_dn, bb_pct = _bb(close)
@@ -373,6 +516,16 @@ def screen_one(market: str, name: str, ticker: str) -> Optional[dict]:
         vol_cur   = float(volume.iloc[-1])
         vol_ratio = round(vol_cur / (vol_avg + 1e-9), 2)
 
+        # MACD+ADX 복합 추세 점수 (0~10) — 리포트 표시용 별도 계산
+        _ma_score = 0
+        if adx_val > 25:
+            _ma_score += 2
+            if plus_di > minus_di:
+                _ma_score += 3
+        if macd_hist > 0:
+            _ma_score += 5
+        macd_adx_score = _ma_score
+
         # 기술적 점수
         tech_score = score_technical(
             rsi, macd_hist, price, ma5, ma20, ma60, mom5,
@@ -384,6 +537,8 @@ def screen_one(market: str, name: str, ticker: str) -> Optional[dict]:
         return {
             "market": market, "name": name, "ticker": ticker,
             "price": round(price, 2), "chg": chg,
+            "today_price": round(today_price, 2) if today_price is not None else None,
+            "today_chg":   round(today_chg,   2) if today_chg   is not None else None,
             # 기존
             "rsi": round(rsi, 1), "macd_hist": round(macd_hist, 4),
             "ma5": round(ma5, 2), "ma20": round(ma20, 2), "ma60": round(ma60, 2),
@@ -394,8 +549,10 @@ def screen_one(market: str, name: str, ticker: str) -> Optional[dict]:
             "stoch_k": round(stoch_k, 1), "stoch_d": round(stoch_d, 1),
             "adx": round(adx_val, 1), "plus_di": round(plus_di, 1), "minus_di": round(minus_di, 1),
             "obv_trend": obv, "pos_52w": pos_52w,
+            "macd_adx_score": macd_adx_score,   # 0~10: 추세(ADX)+방향(+DI)+타이밍(MACD) 복합
             "score": score,
             "fund": {},  # 펀더멘털은 Phase 2에서 채움
+            "is_recently_listed": is_recently_listed,
         }
     except Exception:
         return None
@@ -580,7 +737,7 @@ def _save_screening_cache(results: dict):
 # ═══════════════════════════════════════════════════════════════
 
 def run_screening() -> dict:
-    results = {"KOSPI": [], "KOSDAQ": [], "US": []}
+    results = {"KOSPI": [], "KOSDAQ": [], "US": [], "IPO": []}
 
     # 증권사 추천 Pool 로드 (캐시 우선)
     broker_picks = get_broker_picks()
@@ -626,6 +783,72 @@ def run_screening() -> dict:
     excluded = data_cleaner.get_excluded_count()
     if excluded:
         print(f"  🗑️  데이터 정제 제외: {excluded}개 (logs/excluded_*.log 참조)")
+
+    # ── IPO 풀: FDR 자동 탐지 + 휴리스틱 + JSON 워치리스트 ─────────────────
+    # IPO는 코스피/코스닥 풀과 완전 분리 — 별도 스크리닝 + 별도 추천 슬롯
+    ipo_seen: set = set()
+
+    # 방법0: FinanceDataReader KRX-DESC ListingDate 기반 자동 탐지 (가장 정확)
+    fdr_ipo_pool = get_recent_kr_ipos_auto(days=180)
+    # KOSPI/KOSDAQ 풀에 이미 있는 종목은 제외 (중복 방지)
+    all_screened = set()
+    for mkt in ("KOSPI", "KOSDAQ", "US"):
+        for r in results[mkt]:
+            all_screened.add(r["ticker"])
+    fdr_ipo_pool = {n: t for n, t in fdr_ipo_pool.items()
+                    if t not in all_screened and t not in DELIST_BLACKLIST and t not in SELL_POOL}
+    if fdr_ipo_pool:
+        print(f"  스크리닝: IPO-FDR ({len(fdr_ipo_pool)}개 — 최근 6개월 KRX 신규상장)...")
+        fdr_tasks = []
+        for n, t in fdr_ipo_pool.items():
+            mkt = "KOSPI" if t.endswith(".KS") else "KOSDAQ"
+            fdr_tasks.append((mkt, n, t))
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            futs = {ex.submit(screen_one, m, n, t): (m, n, t) for m, n, t in fdr_tasks}
+            for fut in as_completed(futs):
+                r = fut.result()
+                if r and r["ticker"] not in ipo_seen:
+                    r["is_ipo"] = True
+                    r["investor_tags"] = "신규상장"
+                    results["IPO"].append(r)
+                    ipo_seen.add(r["ticker"])
+
+    # 방법1: KOSPI/KOSDAQ 스크리닝 결과에서 130 거래일 미만 → 6개월 이내 상장 추정
+    # FDR ListingDate 기준으로 교차 검증 — yfinance 데이터 누락에 의한 오탐 방지
+    fdr_ipo_tickers = set(fdr_ipo_pool.values()) | set(ipo_seen)
+    for mkt in ("KOSPI", "KOSDAQ"):
+        for r in results[mkt]:
+            if (r.get("is_recently_listed", False)
+                    and r["ticker"] not in ipo_seen
+                    and r["ticker"] in fdr_ipo_tickers):
+                ipo_copy = dict(r)
+                ipo_copy["is_ipo"] = True
+                ipo_copy["investor_tags"] = "신규상장"
+                results["IPO"].append(ipo_copy)
+                ipo_seen.add(r["ticker"])
+
+    # 방법2: universe_ipo_watchlist.json (수동 등록, 미국 IPO 포함)
+    exclude_ipo = set(SELL_POOL.keys()) | DELIST_BLACKLIST | ipo_seen
+    watchlist_pool = {n: t for n, t in get_recent_ipos(days=180).items()
+                      if t not in exclude_ipo}
+    if watchlist_pool:
+        print(f"  스크리닝: IPO 워치리스트 ({len(watchlist_pool)}개)...")
+        wl_tasks = []
+        for n, t in watchlist_pool.items():
+            mkt = "KOSPI" if t.endswith(".KS") else ("KOSDAQ" if t.endswith(".KQ") else "US")
+            wl_tasks.append((mkt, n, t))
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            futs = {ex.submit(screen_one, m, n, t): (m, n, t) for m, n, t in wl_tasks}
+            for fut in as_completed(futs):
+                r = fut.result()
+                if r:
+                    r["is_ipo"] = True
+                    r["investor_tags"] = "신규상장"
+                    results["IPO"].append(r)
+
+    results["IPO"].sort(key=lambda x: x["score"], reverse=True)
+    if results["IPO"]:
+        print(f"    ✓ IPO (최근 6개월 신규상장) {len(results['IPO'])}개 탐지")
 
     return results
 
@@ -712,6 +935,110 @@ def collect_fear_greed() -> dict:
         return {}
 
 
+# 국내 ETF 유니버스: (티커, 이름, 주요 구성종목 5개)
+_KR_ETF_LIST = [
+    ("069500.KS", "KODEX 200",           ["삼성전자", "SK하이닉스", "LG에너지솔루션", "현대차", "기아"]),
+    ("091160.KS", "KODEX 반도체",        ["삼성전자", "SK하이닉스", "한미반도체", "DB하이텍", "원익IPS"]),
+    ("305720.KS", "KODEX 2차전지",       ["LG에너지솔루션", "삼성SDI", "에코프로비엠", "포스코퓨처엠", "엘앤에프"]),
+    ("091180.KS", "KODEX 자동차",        ["현대차", "기아", "현대모비스", "현대위아", "HL만도"]),
+    ("244580.KS", "KODEX 바이오",        ["삼성바이오로직스", "셀트리온", "한미약품", "유한양행", "종근당"]),
+    ("133690.KS", "TIGER 미국나스닥100", ["애플", "MS", "엔비디아", "아마존", "알파벳"]),
+    ("379800.KS", "KODEX 미국S&P500",    ["애플", "MS", "아마존", "엔비디아", "메타"]),
+    ("232080.KS", "TIGER 코스닥150",     ["에코프로비엠", "HLB", "알테오젠", "리가켐바이오", "크래프톤"]),
+    ("329200.KS", "TIGER K-방산",        ["한화에어로스페이스", "한국항공우주", "LIG넥스원", "현대로템", "풍산"]),
+    ("278540.KS", "KODEX 글로벌AI",      ["엔비디아", "MS", "메타", "TSMC", "삼성전자"]),
+    ("364980.KS", "TIGER 글로벌리튬&2차전지", ["앨버말", "SQM", "리벤트", "파일럿 케미컬", "LG에너지솔루션"]),
+    ("381170.KS", "TIGER 글로벌반도체",  ["TSMC", "엔비디아", "ASML", "SK하이닉스", "삼성전자"]),
+]
+
+
+def collect_kr_etf_picks(top_n: int = 5) -> list:
+    """
+    국내 주요 ETF 성과 분석 → 모멘텀 기준 상위 N개 반환.
+    각 ETF의 1일·5일·20일 수익률을 계산하고 모멘텀 점수로 정렬.
+    """
+    results = []
+    for ticker, name, holdings in _KR_ETF_LIST:
+        try:
+            h = yf.Ticker(ticker).history(period="30d", timeout=10)
+            if h.empty or len(h) < 5:
+                continue
+            cur  = float(h["Close"].iloc[-1])
+            prev = float(h["Close"].iloc[-2])
+            w5   = float(h["Close"].iloc[-6]) if len(h) >= 6 else float(h["Close"].iloc[0])
+            w20  = float(h["Close"].iloc[-21]) if len(h) >= 21 else float(h["Close"].iloc[0])
+            d1   = round((cur - prev) / prev * 100, 2)
+            d5   = round((cur - w5)   / w5   * 100, 2)
+            d20  = round((cur - w20)  / w20  * 100, 2)
+            # 모멘텀 점수: 5일×2 + 20일×1
+            score = d5 * 2 + d20
+            results.append({
+                "ticker":   ticker,
+                "name":     name,
+                "price":    round(cur, 0),
+                "d1":       d1,
+                "d5":       d5,
+                "d20":      d20,
+                "score":    score,
+                "holdings": holdings,
+            })
+        except Exception:
+            pass
+    results.sort(key=lambda x: x["score"], reverse=True)
+    return results[:top_n]
+
+
+# 중국 ETF 풀 (KRX 상장 — 한국 증권사 판매)
+_CHINA_ETF_LIST = [
+    # (티커, 이름, 주요 구성/특징)
+    ("192090.KS", "TIGER 차이나 CSI300", ["중국 A 주 대형주 300 개", "시가총액 가중"]),
+    ("371160.KS", "KODEX 차이나항셍테크", ["알리바바", "텐센트", "메이투안"]),
+    ("305540.KS", "TIGER 차이나전기차", ["BYD", "CATL", "NIO", "리오토"]),
+    ("099140.KS", "KODEX 차이나 H 주", ["중국 블루칩 H 주", "항셍중국기업지수"]),
+    ("192720.KS", "TIGER 차이나 CSI500", ["중국 중소형 성장주 500 개"]),
+    ("152280.KS", "TIGER 차이나항셍 H 주", ["중국 빅 4 은행", "에너지 국유기업"]),
+    ("304850.KS", "KBSTAR 중국본토 CSI100", ["CSI100 초대형주", "집중 포트폴리오"]),
+    ("290130.KS", "TIGER 차이나소비테마", ["중국 내수 소비", "중산층 확대 수혜"]),
+    ("391600.KS", "KODEX 차이나과창판 STAR50", ["상하이 STAR Market", "반도체·바이오·AI"]),
+]
+
+
+def collect_china_etf_picks(top_n: int = 5) -> list:
+    """
+    중국 ETF 성과 분석 → 모멘텀 기준 상위 N 개 반환.
+    각 ETF 의 1 일·5 일·20 일 수익률을 계산하고 모멘텀 점수로 정렬.
+    """
+    results = []
+    for ticker, name, holdings in _CHINA_ETF_LIST:
+        try:
+            h = yf.Ticker(ticker).history(period="30d", timeout=10)
+            if h.empty or len(h) < 5:
+                continue
+            cur  = float(h["Close"].iloc[-1])
+            prev = float(h["Close"].iloc[-2])
+            w5   = float(h["Close"].iloc[-6]) if len(h) >= 6 else float(h["Close"].iloc[0])
+            w20  = float(h["Close"].iloc[-21]) if len(h) >= 21 else float(h["Close"].iloc[0])
+            d1   = round((cur - prev) / prev * 100, 2)
+            d5   = round((cur - w5)   / w5   * 100, 2)
+            d20  = round((cur - w20)  / w20  * 100, 2)
+            # 모멘텀 점수: 5 일×2 + 20 일×1
+            score = d5 * 2 + d20
+            results.append({
+                "ticker":   ticker,
+                "name":     name,
+                "price":    round(cur, 0),
+                "d1":       d1,
+                "d5":       d5,
+                "d20":      d20,
+                "score":    score,
+                "holdings": holdings,
+            })
+        except Exception:
+            pass
+    results.sort(key=lambda x: x["score"], reverse=True)
+    return results[:top_n]
+
+
 def collect_sector_flows() -> dict:
     """
     섹터 ETF 흐름 분석
@@ -784,6 +1111,52 @@ def collect_overseas_snapshot() -> dict:
     return snap
 
 
+def collect_investor_summary() -> dict:
+    """
+    국내외 유명 투자자 포트폴리오 TOP5 요약 반환.
+    {투자자명: [(티커, 설명, 비중), ...]}
+    """
+    try:
+        from investor_scorer import (
+            PELOSI_PORTFOLIO, ARK_TOP_HOLDINGS,
+            PARK_SEOIK_PORTFOLIO, JOHN_LEE_PORTFOLIO,
+            LEE_CHAEWON_PORTFOLIO, KIM_MINGUK_PORTFOLIO,
+            KANG_BANGCHEON_PORTFOLIO,
+        )
+        def top5(portfolio):
+            return sorted(portfolio.items(), key=lambda x: -x[1]["weight"])[:5]
+
+        return {
+            "🇺🇸 Pelosi":       [(t, d["note"], d["weight"]) for t, d in top5(PELOSI_PORTFOLIO)],
+            "🇺🇸 ARK(Cathie)":  [(t, d["note"], d["weight"]) for t, d in top5(ARK_TOP_HOLDINGS)],
+            "🇰🇷 박세익":        [(t, d["note"], d["weight"]) for t, d in top5(PARK_SEOIK_PORTFOLIO)],
+            "🇰🇷 존리":          [(t, d["note"], d["weight"]) for t, d in top5(JOHN_LEE_PORTFOLIO)],
+            "🇰🇷 이채원":        [(t, d["note"], d["weight"]) for t, d in top5(LEE_CHAEWON_PORTFOLIO)],
+            "🇰🇷 김민국":        [(t, d["note"], d["weight"]) for t, d in top5(KIM_MINGUK_PORTFOLIO)],
+            "🇰🇷 강방천":        [(t, d["note"], d["weight"]) for t, d in top5(KANG_BANGCHEON_PORTFOLIO)],
+        }
+    except Exception:
+        return {}
+
+
+def get_theme_picks(all_results: dict, top_n: int = 3) -> dict:
+    """
+    스크리닝 결과(all_results)에서 국내 테마별 상위 종목 추출.
+    테마 정의는 _THEMES 사용. 결과 없는 테마는 생략.
+    """
+    kr_stocks = all_results.get("KOSPI", []) + all_results.get("KOSDAQ", [])
+    theme_picks = {}
+    for theme_key, cfg in _THEMES.items():
+        if "suffix" in cfg:
+            continue  # kr/us 전체 필터는 제외
+        tickers = cfg.get("tickers", set())
+        picks = [r for r in kr_stocks if r["ticker"] in tickers]
+        picks.sort(key=lambda x: x["score"], reverse=True)
+        if picks:
+            theme_picks[cfg["desc"]] = picks[:top_n]
+    return theme_picks
+
+
 def load_external_events() -> list:
     """external_events.json 에서 활성 이벤트 로드 (파일 없으면 빈 리스트)"""
     try:
@@ -816,6 +1189,7 @@ def signal_label_buy(score: int) -> str:
 # ═══════════════════════════════════════════════════════════════
 
 _MAX_PROMPT_CHARS = 28_000  # ≈ 8,000 토큰 (한+영 혼합 기준 ~3.5자/토큰)
+_last_claude_structured: dict = {}  # 최근 Claude JSON 구조화 결과 (선별 반영용)
 
 
 def _extract_claude_json(text: str) -> "tuple[str, dict]":
@@ -828,12 +1202,15 @@ def _extract_claude_json(text: str) -> "tuple[str, dict]":
         JSON 파싱 실패 시 (원본 텍스트, {}) 반환.
     """
     import re
-    pattern = r"```json\s*(\{.*?\})\s*```"
+    pattern = r"```json\s*(\{.*\})\s*```"
     m = re.search(pattern, text, re.DOTALL)
     if not m:
         return text, {}
     json_str = m.group(1)
-    clean_text = text[:m.start()].rstrip()
+    # JSON이 앞에 있으면 이후 텍스트, 뒤에 있으면 이전 텍스트 사용
+    before = text[:m.start()].rstrip()
+    after  = text[m.end():].lstrip()
+    clean_text = after if after else before
     try:
         return clean_text, json.loads(json_str)
     except json.JSONDecodeError:
@@ -879,25 +1256,66 @@ def _stock_line(r: dict, include_fund: bool = True) -> str:
 def ask_claude_v4(kospi_buy, kosdaq_buy, us_buy,
                   kospi_sell, kosdaq_sell, us_sell,
                   macro, news, overseas, fear_greed, sector_flows,
-                  external_events=None) -> str:
+                  external_events=None,
+                  investor_summary=None,
+                  theme_picks=None) -> str:
+    global _last_claude_structured
     try:
         import anthropic
         client = anthropic.Anthropic(api_key=_get("ANTHROPIC_API_KEY"))
     except Exception as e:
         return f"[Claude 분석 생략 — ANTHROPIC_API_KEY 없음: {e}]"
 
-    # 캐시 확인 (외부 이벤트가 바뀌면 캐시 무효화)
+    # 캐시 확인
     ext_events = external_events or []
-    # 캐시 키: 날짜 + 외부이벤트만 사용 (점수 제외 → yfinance 미세 변동으로 캐시 미스 방지)
+
+    def _macro_fingerprint() -> str:
+        """
+        거시·뉴스의 의미 있는 변화만 감지하는 지문.
+        소폭 등락은 무시하고 실질적 변화 시에만 Claude 재호출.
+
+        민감도 기준:
+          Fear&Greed : 4단계 레이블 기준 (극도공포/공포/탐욕/극도탐욕)
+          VIX        : 정수 단위 (1pt 변화)
+          USD/KRW    : 50원 단위 (1450~1500 = 동일 버킷)
+          뉴스       : 상위 3건 헤드라인 앞 30자
+        """
+        fg_val = fear_greed.get("지수", 50) if fear_greed else 50
+        if fg_val < 25:
+            fg_level = "extreme_fear"
+        elif fg_val < 50:
+            fg_level = "fear"
+        elif fg_val < 75:
+            fg_level = "greed"
+        else:
+            fg_level = "extreme_greed"
+
+        vix_r    = round(macro.get("VIX",     {}).get("현재", 20) / 2) * 2    # 2pt 버킷
+        usdkrw_r = round(macro.get("USD/KRW", {}).get("현재", 1300) / 50) * 50  # 50원 버킷
+        headlines = tuple(
+            (n.get("title", "") if isinstance(n, dict) else str(n))[:30]
+            for n in (news or [])[:3]
+        )
+        raw = json.dumps((fg_level, vix_r, usdkrw_r, headlines),
+                         ensure_ascii=False)
+        import hashlib
+        return hashlib.md5(raw.encode()).hexdigest()[:8]
+
+    # 캐시 키: 날짜 + 외부이벤트 + 거시·뉴스 지문
+    # → 거시·뉴스가 의미 있게 바뀌면 Claude 재호출, 미세 변동은 캐시 재사용
     cache_data = {
         "date": datetime.datetime.now().strftime("%Y-%m-%d"),
         "external_events": sorted([e.get("id", "") for e in ext_events]),
+        "macro_fp": _macro_fingerprint(),
     }
     try:
         from token_cache import get_cached_analysis, save_analysis_cache
         cached = get_cached_analysis(cache_data, cache_hours=24)
         if cached:
-            print("  ✓ 캐시 분석 결과 사용")
+            print(f"  ✓ 캐시 분석 결과 사용 (macro_fp={cache_data['macro_fp']})")
+            _, _cached_struct = _extract_claude_json(cached)
+            if _cached_struct:
+                _last_claude_structured = _cached_struct
             return cached
     except Exception:
         pass
@@ -938,10 +1356,28 @@ def ask_claude_v4(kospi_buy, kosdaq_buy, us_buy,
             f"[{ev['category']}]{ev['title']}→{ev['impact']}" for ev in ext_events
         ) + "\n"
 
+    # 유명 투자자 포트폴리오
+    inv_txt = ""
+    if investor_summary:
+        lines = []
+        for inv, picks in investor_summary.items():
+            picks_str = " / ".join(f"{t}({note})" for t, note, w in picks[:3])
+            lines.append(f"{inv}: {picks_str}")
+        inv_txt = "유명투자자 관심종목:\n" + "\n".join(lines) + "\n"
+
+    # 국내 테마별 상위 종목
+    theme_txt = ""
+    if theme_picks:
+        lines = []
+        for theme, stocks in theme_picks.items():
+            picks_str = " / ".join(f"{r['name']}({r['score']:+d})" for r in stocks)
+            lines.append(f"[{theme}] {picks_str}")
+        theme_txt = "국내테마 상위종목:\n" + "\n".join(lines) + "\n"
+
     def _build_prompt(kb, kqb, ub, ks, kqs, us):
         return f"""{datetime.datetime.now().strftime('%Y-%m-%d')} 주식 애널리스트 투자 의견 작성.
 
-{ext_txt}거시: {macro_txt}
+{ext_txt}{inv_txt}{theme_txt}거시: {macro_txt}
 심리: {fg_txt}
 섹터5일: {sector_txt}
 해외: {ov_txt}
@@ -954,15 +1390,67 @@ def ask_claude_v4(kospi_buy, kosdaq_buy, us_buy,
 {block(kqs, 'KQ매도')}
 {block(us, 'US매도')}
 
-지침(간결·수치중심):
-1. 매수종목별: [순위.종목] ★등급 / 매수논리2줄 / 분할매수(1차40%·2차·3차) / 목표가3단계 / 손절가(데이터의 손절값) / 펀더멘털1줄
-2. 매도종목별: [순위.종목] ▼등급 / 매도논리2줄 / 매도전략 / 하락목표가
-3. 시장판단: F&G해석·강세섹터2·약세섹터2·핵심전략·리스크
+출력 형식 (반드시 아래 구조 그대로):
 
-분석 텍스트 작성 후 반드시 아래 형식 JSON을 마지막에 출력하라:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🌐 시장 총평
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+시장판단 1줄
+강세섹터: XXX / 약세섹터: XXX
+핵심전략: XXX
+주요리스크: XXX
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🟢 KR 매수 추천
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+① 종목명 (티커) ★★★★★
+📌 매수논리 : [기술적 + 펀더멘털 핵심 근거 1~2줄]
+🏢 비즈니스 : [실적개선·매출성장·마진확대·신사업·섹터 모멘텀 등 비즈니스 상황 1줄]
+💰 분할매수 : 1차 40% @현재가 / 2차 30% @-X% / 3차 30% @-X%
+🎯 목표가   : ① XXX  ② XXX  ③ XXX
+🛑 손절가   : XXX
+📊 펀더멘털 : [P/E·ROE·EPS성장률·이익률 등 핵심 지표 1줄]
+─────────────────────────────────────
+
+(매수 종목 없으면 "해당 없음" 한 줄)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🟢 KQ 매수 추천
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+(동일 구조 반복)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🟢 US 매수 추천
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+(동일 구조 반복)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔴 KR 매도 추천
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+① 종목명 (티커) ▼▼▼
+📌 매도논리 : [기술적 + 펀더멘털 핵심 근거 1~2줄]
+🔍 리스크요인 : [밸류에이션·실적악화·재무구조·테마 소멸·업황 둔화 등 1줄]
+📉 매도전략 : [분할매도 또는 즉시매도]
+🎯 하락목표 : XXX
+─────────────────────────────────────
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔴 KQ 매도 추천
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+(동일 구조 반복)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔴 US 매도 추천
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+(동일 구조 반복)
+
+규칙: 마크다운(#, >, **) 사용 금지. 들여쓰기(공백) 없이 모든 줄은 맨 왼쪽에서 시작. 위 템플릿 구조와 이모지 그대로 유지.
+
+반드시 분석 텍스트 맨 앞에 아래 JSON을 먼저 출력하라 (선별 기준으로 활용):
 ```json
 {{"top_buy":[{{"ticker":"티커","name":"종목명","grade":"★★★","target1":0,"target2":0,"stop":0}}],"top_sell":[{{"ticker":"티커","name":"종목명","stop":0}}],"market":"시장판단한줄","risk":"핵심리스크한줄","fg_signal":"매수|관망|매도"}}
-```"""
+```
+JSON 출력 후 아래 상세 분석을 이어서 출력하라."""
 
     prompt = _build_prompt(kospi_buy, kosdaq_buy, us_buy, kospi_sell, kosdaq_sell, us_sell)
 
@@ -982,7 +1470,7 @@ def ask_claude_v4(kospi_buy, kosdaq_buy, us_buy,
     try:
         resp = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=3500,
+            max_tokens=5000,
             temperature=0,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -990,7 +1478,8 @@ def ask_claude_v4(kospi_buy, kosdaq_buy, us_buy,
         # JSON 블록 추출 후 텍스트 분리
         text_part, structured = _extract_claude_json(full_text)
         if structured:
-            # 구조화 데이터 별도 캐시 저장
+            # 구조화 데이터 모듈 변수 + 파일 저장
+            _last_claude_structured = structured
             _save_claude_structured(structured)
         try:
             save_analysis_cache(cache_data, full_text)
@@ -1031,38 +1520,57 @@ def _auto_analysis(r: dict, section: str) -> list[str]:
     stop    = round(price - 2.0 * atr, 2)
 
     if section == "buy":
-        # ── 매수 근거 ──────────────────────────────────────
-        reasons = []
+        # ── 기술적 근거 ──────────────────────────────────────
+        tech_reasons = []
         if rsi < 30:
-            reasons.append(f"RSI {rsi:.0f} 과매도 — 기술적 반등 신호")
+            tech_reasons.append(f"RSI {rsi:.0f} 과매도 — 기술적 반등 신호")
         elif rsi < 40:
-            reasons.append(f"RSI {rsi:.0f} 약과매도 — 저가 매수 구간")
+            tech_reasons.append(f"RSI {rsi:.0f} 약과매도 — 저가 매수 구간")
         if macd > 0:
-            reasons.append("MACD 히스토그램 양전환 — 상승 모멘텀 확인")
+            tech_reasons.append("MACD 히스토그램 양전환 — 상승 모멘텀 확인")
         if price > ma20 > ma60:
-            reasons.append("이동평균 정배열(가격>MA20>MA60) — 강한 상승 추세")
+            tech_reasons.append("이동평균 정배열(가격>MA20>MA60) — 강한 상승 추세")
         elif price > ma20:
-            reasons.append("가격이 MA20 상회 — 단기 상승 구조")
+            tech_reasons.append("가격이 MA20 상회 — 단기 상승 구조")
         if adx > 25 and plus_di > minus_di:
-            reasons.append(f"ADX {adx:.0f} 강한 추세 (+DI{plus_di:.0f}>-DI{minus_di:.0f}) — 방향성 확립")
+            tech_reasons.append(f"ADX {adx:.0f} 강한 추세 (+DI{plus_di:.0f}>-DI{minus_di:.0f}) — 방향성 확립")
         if pos_52w < 20:
-            reasons.append(f"52주 저점 근처 {pos_52w:.0f}% — 반등 기대")
+            tech_reasons.append(f"52주 저점 근처 {pos_52w:.0f}% — 반등 기대")
         elif pos_52w > 80:
-            reasons.append(f"52주 고점 구간 {pos_52w:.0f}% — 상승 모멘텀 지속")
+            tech_reasons.append(f"52주 고점 구간 {pos_52w:.0f}% — 상승 모멘텀 지속")
         if stoch_k < 20:
-            reasons.append(f"스토캐스틱 {stoch_k:.0f} 과매도 — 반등 가능")
+            tech_reasons.append(f"스토캐스틱 {stoch_k:.0f} 과매도 — 반등 가능")
         if vol > 1.5:
-            reasons.append(f"거래량 {vol:.1f}x 급증 — 수급 유입 신호")
+            tech_reasons.append(f"거래량 {vol:.1f}x 급증 — 수급 유입 신호")
         if mom5 > 3:
-            reasons.append(f"5일 모멘텀 +{mom5:.1f}% — 단기 상승 흐름")
-        if fund.get("pe") and fund["pe"] < 15:
-            reasons.append(f"P/E {fund['pe']} 저평가 — 가치 매력")
-        if fund.get("roe_pct") and fund["roe_pct"] > 15:
-            reasons.append(f"ROE {fund['roe_pct']}% 고수익성 — 펀더멘털 우량")
-        if not reasons:
-            reasons.append(f"종합점수 {r['score']:+d}점 — 상대적 강세 우위")
+            tech_reasons.append(f"5일 모멘텀 +{mom5:.1f}% — 단기 상승 흐름")
 
-        lines.append(f"       ✅ 매수 근거: {' / '.join(reasons[:3])}")
+        # ── 펀더멘털 & 비즈니스 근거 ──────────────────────────
+        fund_reasons = []
+        if fund.get("eps_growth_pct") and fund["eps_growth_pct"] > 20:
+            fund_reasons.append(f"EPS 성장 +{fund['eps_growth_pct']:.0f}% — 실적 개선 가속")
+        elif fund.get("eps_growth_pct") and fund["eps_growth_pct"] > 10:
+            fund_reasons.append(f"EPS 성장 +{fund['eps_growth_pct']:.0f}% — 이익 성장 확인")
+        if fund.get("roe_pct") and fund["roe_pct"] > 25:
+            fund_reasons.append(f"ROE {fund['roe_pct']:.0f}% — 탁월한 자본 효율")
+        elif fund.get("roe_pct") and fund["roe_pct"] > 15:
+            fund_reasons.append(f"ROE {fund['roe_pct']:.0f}% — 고수익성 비즈니스")
+        if fund.get("margin_pct") and fund["margin_pct"] > 20:
+            fund_reasons.append(f"순이익률 {fund['margin_pct']:.0f}% — 고마진 구조")
+        elif fund.get("margin_pct") and fund["margin_pct"] > 10:
+            fund_reasons.append(f"순이익률 {fund['margin_pct']:.0f}% — 견조한 수익성")
+        if fund.get("pe") and fund["pe"] < 15:
+            fund_reasons.append(f"P/E {fund['pe']} — 저평가 가치 매력")
+        if fund.get("pb") and fund["pb"] < 1.0:
+            fund_reasons.append(f"P/B {fund['pb']} — 자산 대비 저평가")
+
+        if not tech_reasons and not fund_reasons:
+            tech_reasons.append(f"종합점수 {r['score']:+d}점 — 상대적 강세 우위")
+
+        if tech_reasons:
+            lines.append(f"       ✅ 기술적 근거: {' / '.join(tech_reasons[:3])}")
+        if fund_reasons:
+            lines.append(f"       📈 펀더멘털: {' / '.join(fund_reasons[:3])}")
 
         # ── 분할매수 & 목표가 ──────────────────────────────
         buy2 = round(price - 2.0 * atr, 2)
@@ -1080,27 +1588,53 @@ def _auto_analysis(r: dict, section: str) -> list[str]:
         )
         lines.append(f"       🛑 손절가: {stop:,.0f} (ATR×2 — 변동성 기반 동적 손절)")
 
-        # ── 리스크 ────────────────────────────────────────
-        risks = []
+        # ── 기술적 리스크 ─────────────────────────────────
+        tech_risks = []
         if rsi > 60:
-            risks.append(f"RSI {rsi:.0f} — 추가 과열 시 조정 가능")
+            tech_risks.append(f"RSI {rsi:.0f} — 추가 과열 시 조정 가능")
         if adx < 20:
-            risks.append(f"ADX {adx:.0f} 횡보 — 추세 신뢰도 낮음")
+            tech_risks.append(f"ADX {adx:.0f} 횡보 — 추세 신뢰도 낮음")
         if mom5 < -2:
-            risks.append(f"5일 모멘텀 {mom5:.1f}% — 단기 하락 압력")
+            tech_risks.append(f"5일 모멘텀 {mom5:.1f}% — 단기 하락 압력")
         if price < ma20:
-            risks.append("MA20 하회 — 지지선 붕괴 주의")
+            tech_risks.append("MA20 하회 — 지지선 붕괴 주의")
         if bb_pct > 85:
-            risks.append(f"BB {bb_pct:.0f}% — 상단 근접, 단기 과열")
+            tech_risks.append(f"BB {bb_pct:.0f}% — 상단 근접, 단기 과열")
         if stoch_k > 75:
-            risks.append(f"스토캐스틱 {stoch_k:.0f} — 단기 과매수")
+            tech_risks.append(f"스토캐스틱 {stoch_k:.0f} — 단기 과매수")
         if vol < 0.5:
-            risks.append(f"거래량 {vol:.1f}x 위축 — 상승 동력 부족")
-        if fund.get("pe") and fund["pe"] > 40:
-            risks.append(f"P/E {fund['pe']} 고평가 — 밸류에이션 부담")
-        if not risks:
-            risks.append("현재 주요 기술적 리스크 없음")
-        lines.append(f"       ⚠️ 리스크: {' / '.join(risks[:3])}")
+            tech_risks.append(f"거래량 {vol:.1f}x 위축 — 상승 동력 부족")
+        if pos_52w > 90:
+            tech_risks.append(f"52주 신고가 {pos_52w:.0f}% — 차익 실현 압력")
+
+        # ── 펀더멘털 & 비즈니스 리스크 ──────────────────────
+        fund_risks = []
+        if fund.get("pe") and fund["pe"] > 50:
+            fund_risks.append(f"P/E {fund['pe']} — 밸류에이션 과부담")
+        elif fund.get("pe") and fund["pe"] > 30:
+            fund_risks.append(f"P/E {fund['pe']} — 고평가, 실적 미달 시 급락 위험")
+        if fund.get("eps_growth_pct") is not None and fund["eps_growth_pct"] < -10:
+            fund_risks.append(f"EPS {fund['eps_growth_pct']:.0f}% 역성장 — 실적 악화 추세")
+        elif fund.get("eps_growth_pct") is not None and fund["eps_growth_pct"] < 0:
+            fund_risks.append(f"EPS 감소 {fund['eps_growth_pct']:.0f}% — 이익 모멘텀 약화")
+        if fund.get("roe_pct") is not None and fund["roe_pct"] < 0:
+            fund_risks.append("ROE 음수 — 적자 기업 구조")
+        elif fund.get("roe_pct") is not None and fund["roe_pct"] < 5:
+            fund_risks.append(f"ROE {fund['roe_pct']:.0f}% — 낮은 자본 효율")
+        if fund.get("margin_pct") is not None and fund["margin_pct"] < 0:
+            fund_risks.append(f"순이익률 {fund['margin_pct']:.0f}% — 수익성 적자")
+        if fund.get("de_ratio") and fund["de_ratio"] > 200:
+            fund_risks.append(f"부채비율 {fund['de_ratio']:.0f}% — 재무 레버리지 부담")
+        if fund.get("pb") and fund["pb"] > 5:
+            fund_risks.append(f"P/B {fund['pb']} — 자산 대비 고평가")
+
+        if not tech_risks and not fund_risks:
+            tech_risks.append("현재 주요 리스크 없음")
+
+        if tech_risks:
+            lines.append(f"       ⚠️ 기술적 리스크: {' / '.join(tech_risks[:3])}")
+        if fund_risks:
+            lines.append(f"       🔍 펀더멘털 리스크: {' / '.join(fund_risks[:3])}")
 
     else:  # sell
         # ── 매도 근거 ──────────────────────────────────────
@@ -1157,19 +1691,62 @@ def _auto_analysis(r: dict, section: str) -> list[str]:
 # 리포트 생성
 # ═══════════════════════════════════════════════════════════════
 
+def _extract_market_summary(claude_text: str) -> str:
+    """Claude 텍스트에서 🌐 시장 총평 섹션만 추출한다."""
+    import re
+    # JSON 블록 이후 텍스트에서 시장 총평 ~ 다음 섹션(🟢/🔴) 직전까지 추출
+    m = re.search(r'(━+\n🌐 시장 총평\n━+\n.*?)(?=\n━+\n[🟢🔴]|\Z)', claude_text, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    # 구분선 없이 🌐로 시작하는 경우 폴백
+    m2 = re.search(r'(🌐 시장 총평.*?)(?=🟢|🔴|\Z)', claude_text, re.DOTALL)
+    if m2:
+        return m2.group(1).strip()
+    return ""
+
+
 def build_report(kospi_buy, kosdaq_buy, us_buy,
                  kospi_sell, kosdaq_sell, us_sell,
-                 total: dict, fear_greed: dict, claude_opinion: str) -> str:
+                 total: dict, fear_greed: dict, claude_opinion: str,
+                 investor_summary: dict = None, theme_picks: dict = None,
+                 verification_section: str = "",
+                 macro_regime: dict = None,
+                 kr_etf_picks: list = None,
+                 china_etf_picks: list = None,
+                 ipo_buy: list = None) -> str:
     now = datetime.datetime.now().strftime("%Y년 %m월 %d일 %H:%M")
     L   = []
 
+    # ── 헤더 ──────────────────────────────────────────────────────
     L.append("=" * 80)
     L.append(f"  📊 AI 주식 스크리닝 v4 (정밀 분석판)  |  {now}")
-    L.append(f"  스캔: 코스피 {total['KOSPI']}개 | 코스닥 {total['KOSDAQ']}개 | 미국 {total['US']}개")
+    _ipo_cnt = len(ipo_buy) if ipo_buy else 0
+    L.append(f"  스캔: 코스피 {total.get('KOSPI',0)}개 | 코스닥 {total.get('KOSDAQ',0)}개 | 미국 {total.get('US',0)}개 | IPO {total.get('IPO',0)}개")
     fg = fear_greed
     if fg:
         L.append(f"  Fear&Greed: {fg['지수']}/100 [{fg['단계']}] → {fg['해석']}")
+    if macro_regime:
+        _regime_icon = {"강세": "🟢", "중립": "🟡", "약세": "🔴", "극도약세": "🔴🔴"}.get(
+            macro_regime["regime"], "⚪")
+        _adj = macro_regime.get("applied_adjustment", macro_regime.get("score_adjustment", 0))
+        _bwr = macro_regime.get("buy_win_rate")
+        _swr = macro_regime.get("sell_win_rate")
+        _wr_str = ""
+        if _bwr is not None:
+            _wr_str = f" | 최근5일 매수승률:{_bwr:.0f}% 매도승률:{_swr:.0f}%"
+        L.append(f"  {_regime_icon} 시장레짐: {macro_regime['regime']}"
+                 f"  (레짐점수:{macro_regime['regime_score']:+d}"
+                 f", 점수보정:{_adj:+d}점){_wr_str}")
+        for _r in macro_regime.get("reasons", []):
+            L.append(f"    · {_r}")
     L.append("=" * 80)
+
+    # ── Claude 시장 총평 (헤더 바로 아래) ─────────────────────────
+    market_summary = _extract_market_summary(claude_opinion)
+    if market_summary:
+        L.append("")
+        L.append(market_summary)
+    L.append("")
 
     def fmt_block(stocks, header, icon, section="neutral"):
         L.append("\n" + "─" * 80)
@@ -1181,8 +1758,13 @@ def build_report(kospi_buy, kosdaq_buy, us_buy,
             stop = round(r["price"] - 2.0 * r["atr"], 2)
             fund = r.get("fund", {})
             L.append(f"\n  {i:2d}위  {lbl}  {r['name']} ({r['ticker']})")
-            L.append(f"       점수:{r['score']:+d}점 | 현재가:{r['price']:>12,.2f} | "
-                     f"등락:{chg_icon}{abs(r['chg']):.2f}% | ATR손절:{stop:,.2f}")
+            today_str = ""
+            if r.get("today_price") is not None:
+                t_icon = "▲" if r["today_chg"] >= 0 else "▼"
+                today_str = (f"  ⚡장중:{r['today_price']:,.2f}"
+                             f"({t_icon}{abs(r['today_chg']):.2f}%)")
+            L.append(f"       점수:{r['score']:+d}점 | 기준가:{r['price']:>12,.2f} | "
+                     f"등락:{chg_icon}{abs(r['chg']):.2f}% | ATR손절:{stop:,.2f}{today_str}")
             L.append(f"       RSI:{r['rsi']:.0f} Stoch:{r['stoch_k']:.0f}/{r['stoch_d']:.0f} | "
                      f"MACD:{r['macd_hist']:+.4f} | BB:{r['bb_pct']:.0f}%")
             L.append(f"       MA5:{r['ma5']:,.2f} MA20:{r['ma20']:,.2f} MA60:{r['ma60']:,.2f} | "
@@ -1203,15 +1785,81 @@ def build_report(kospi_buy, kosdaq_buy, us_buy,
 
     fmt_block(kospi_buy,  "코스피 매수 TOP", "🇰🇷", "buy")
     fmt_block(kosdaq_buy, "코스닥 매수 TOP", "🇰🇷", "buy")
+    if ipo_buy:
+        fmt_block(ipo_buy, "신규상장(IPO) 주목 TOP 5 — 최근 6개월 상장", "🆕", "buy")
     fmt_block(us_buy,     "미국 매수 TOP",   "🇺🇸", "buy")
     fmt_block(kospi_sell,  "코스피 매도 TOP", "🇰🇷", "sell")
     fmt_block(kosdaq_sell, "코스닥 매도 TOP", "🇰🇷", "sell")
     fmt_block(us_sell,     "미국 매도 TOP",   "🇺🇸", "sell")
 
-    L.append("\n" + "=" * 80)
-    L.append("  🤖 Claude AI 심층 분석")
-    L.append("=" * 80)
-    L.append(claude_opinion)
+    # 유명 투자자 포트폴리오 섹션
+    if investor_summary:
+        L.append("\n" + "─" * 80)
+        L.append("  🌟 유명 투자자 포트폴리오 TOP5")
+        L.append("─" * 80)
+        for inv, picks in investor_summary.items():
+            L.append(f"\n  {inv}")
+            for t, note, w in picks:
+                L.append(f"    {t:12s}  비중:{w:2d}%  {note}")
+
+    # 국내 테마별 상위 종목 섹션
+    if theme_picks:
+        L.append("\n" + "─" * 80)
+        L.append("  🏷️  국내 테마별 스크리닝 상위 종목")
+        L.append("─" * 80)
+        for theme, stocks in theme_picks.items():
+            L.append(f"\n  [{theme}]")
+            for i, r in enumerate(stocks, 1):
+                stop = round(r["price"] - 2.0 * r["atr"], 2)
+                today_str = ""
+                if r.get("today_price") is not None:
+                    t_icon = "▲" if r["today_chg"] >= 0 else "▼"
+                    today_str = f"  ⚡{t_icon}{abs(r['today_chg']):.1f}%"
+                L.append(f"    {i}. {r['name']} ({r['ticker']})  점수:{r['score']:+d}  "
+                         f"RSI:{r['rsi']:.0f}  손절:{stop:,.0f}{today_str}")
+
+    # 국내 유망 ETF TOP 5 섹션
+    if kr_etf_picks:
+        L.append("\n" + "─" * 80)
+        L.append("  📦 국내 유망 ETF TOP 5  (모멘텀: 5일×2 + 20일×1 기준)")
+        L.append("─" * 80)
+        for i, etf in enumerate(kr_etf_picks, 1):
+            d1_icon  = "▲" if etf["d1"]  >= 0 else "▼"
+            d5_icon  = "▲" if etf["d5"]  >= 0 else "▼"
+            d20_icon = "▲" if etf["d20"] >= 0 else "▼"
+            L.append(f"\n  {i}위  {etf['name']} ({etf['ticker']})")
+            L.append(
+                f"       현재가: {etf['price']:>10,.0f}  "
+                f"전일: {d1_icon}{abs(etf['d1']):.2f}%  "
+                f"5일: {d5_icon}{abs(etf['d5']):.2f}%  "
+                f"20일: {d20_icon}{abs(etf['d20']):.2f}%"
+            )
+            L.append(f"       주요 구성: {' / '.join(etf['holdings'])}")
+
+    # 중국 ETF 추천 TOP 5 섹션
+    if china_etf_picks:
+        L.append("\n" + "─" * 80)
+        L.append("  🇨🇳 중국 ETF 추천 TOP 5  (모멘텀: 5 일×2 + 20 일×1 기준)")
+        L.append("─" * 80)
+        for i, etf in enumerate(china_etf_picks, 1):
+            d1_icon  = "▲" if etf["d1"]  >= 0 else "▼"
+            d5_icon  = "▲" if etf["d5"]  >= 0 else "▼"
+            d20_icon = "▲" if etf["d20"] >= 0 else "▼"
+            L.append(f"\n  {i}위  {etf['name']} ({etf['ticker']})")
+            L.append(
+                f"       현재가: {etf['price']:>10,.0f}  "
+                f"전일: {d1_icon}{abs(etf['d1']):.2f}%  "
+                f"5 일: {d5_icon}{abs(etf['d5']):.2f}%  "
+                f"20 일: {d20_icon}{abs(etf['d20']):.2f}%"
+            )
+            L.append(f"       주요 구성: {' / '.join(etf['holdings'])}")
+        L.append("\n  ⚠️ 중국 ETF 리스크: 위안화 환율 변동성 / 중국 정책 리스크 / 지리적 긴장")
+
+    # 추천 검증 섹션 (데이터 있을 때만 삽입)
+    if verification_section:
+        L.append("")
+        L.append(verification_section)
+
     L.append("\n" + "=" * 80)
     L.append("  ⚠️  기술적·펀더멘털 분석 참고용 / 투자 손익 책임은 본인에게 있습니다.")
     L.append("=" * 80 + "\n")
@@ -1246,7 +1894,7 @@ tr:hover td{background:#fafafa}
 .score-pos{color:#2e7d32;font-weight:700}
 .score-neg{color:#c62828;font-weight:700}
 .chg-up{color:#c62828}.chg-dn{color:#1565c0}
-.claude-box{background:#f3e5f5;border-left:4px solid #7b1fa2;padding:14px 18px;
+.claude-box{background:#f3e5f5;border-left:4px solid #7b1fa2;padding:14px 10px 14px 0;
             font-size:12px;line-height:1.7;white-space:pre-wrap;word-break:break-word}
 .perf-box{background:#e8f5e9;border-left:4px solid #2e7d32;padding:14px 18px;font-size:12px}
 .perf-row{display:flex;gap:24px;flex-wrap:wrap}
@@ -1297,7 +1945,10 @@ def build_html_report(kospi_buy, kosdaq_buy, us_buy,
                       kospi_sell, kosdaq_sell, us_sell,
                       total: dict, fear_greed: dict,
                       claude_opinion: str,
-                      perf_summary: str = "") -> str:
+                      perf_summary: str = "",
+                      ipo_buy: list = None,
+                      kr_etf_picks: list = None,
+                      china_etf_picks: list = None) -> str:
     """HTML 이메일 본문 생성."""
     now = datetime.datetime.now().strftime("%Y년 %m월 %d일 %H:%M")
     fg = fear_greed or {}
@@ -1320,20 +1971,84 @@ def build_html_report(kospi_buy, kosdaq_buy, us_buy,
             f"{content}</div>"
         )
 
-    sections = [
+    import html as _html
+
+    # Claude 시장 총평 → 헤더 바로 아래 섹션
+    market_summary = _extract_market_summary(claude_opinion or "")
+    market_summary_esc = _html.escape(market_summary)
+
+    sections = []
+    if market_summary:
+        sections.append(section("🌐 시장 총평 (Claude AI)",
+                                 f"<div class='claude-box'>{market_summary_esc}</div>"))
+
+    sections += [
         section("🇰🇷 코스피 매수 TOP", _html_stock_table(kospi_buy, "buy")),
         section("🇰🇷 코스닥 매수 TOP", _html_stock_table(kosdaq_buy, "buy")),
+    ]
+    if ipo_buy:
+        sections.append(section("🆕 신규상장(IPO) 주목 TOP 5 — 최근 6개월 상장", _html_stock_table(ipo_buy, "buy")))
+    sections += [
         section("🇺🇸 미국 매수 TOP",   _html_stock_table(us_buy, "buy")),
+    ]
+    sections += [
         section("🇰🇷 코스피 매도 TOP", _html_stock_table(kospi_sell, "sell")),
         section("🇰🇷 코스닥 매도 TOP", _html_stock_table(kosdaq_sell, "sell")),
         section("🇺🇸 미국 매도 TOP",   _html_stock_table(us_sell, "sell")),
     ]
 
-    # Claude 분석
-    import html as _html
-    claude_esc = _html.escape(claude_opinion or "")
-    sections.append(section("🤖 Claude AI 심층 분석",
-                             f"<div class='claude-box'>{claude_esc}</div>"))
+    # 국내 유망 ETF TOP 5
+    if kr_etf_picks:
+        rows = []
+        for i, etf in enumerate(kr_etf_picks, 1):
+            d1_icon  = "▲" if etf["d1"]  >= 0 else "▼"
+            d5_icon  = "▲" if etf["d5"]  >= 0 else "▼"
+            d20_icon = "▲" if etf["d20"] >= 0 else "▼"
+            d1_cls  = "pos" if etf["d1"]  >= 0 else "neg"
+            d5_cls  = "pos" if etf["d5"]  >= 0 else "neg"
+            d20_cls = "pos" if etf["d20"] >= 0 else "neg"
+            rows.append(
+                f"<tr><td>{i}</td><td>{_html.escape(etf['name'])}</td>"
+                f"<td>{etf['ticker']}</td><td style='text-align:right'>{etf['price']:,.0f}</td>"
+                f"<td class='{d1_cls}'>{d1_icon}{abs(etf['d1']):.2f}%</td>"
+                f"<td class='{d5_cls}'>{d5_icon}{abs(etf['d5']):.2f}%</td>"
+                f"<td class='{d20_cls}'>{d20_icon}{abs(etf['d20']):.2f}%</td>"
+                f"<td style='font-size:11px'>{' / '.join(etf['holdings'][:3])}</td></tr>"
+            )
+        etf_html = (
+            "<table style='width:100%;border-collapse:collapse;font-size:12px'>"
+            "<tr style='background:#f0f0f0'><th>#</th><th>ETF명</th><th>티커</th>"
+            "<th>현재가</th><th>전일</th><th>5일</th><th>20일</th><th>주요 구성</th></tr>"
+            + "".join(rows) + "</table>"
+        )
+        sections.append(section("📦 국내 유망 ETF TOP 5 (모멘텀 기준)", etf_html))
+
+    # 중국 ETF 추천 TOP 5
+    if china_etf_picks:
+        rows = []
+        for i, etf in enumerate(china_etf_picks, 1):
+            d1_icon  = "▲" if etf["d1"]  >= 0 else "▼"
+            d5_icon  = "▲" if etf["d5"]  >= 0 else "▼"
+            d20_icon = "▲" if etf["d20"] >= 0 else "▼"
+            d1_cls  = "pos" if etf["d1"]  >= 0 else "neg"
+            d5_cls  = "pos" if etf["d5"]  >= 0 else "neg"
+            d20_cls = "pos" if etf["d20"] >= 0 else "neg"
+            rows.append(
+                f"<tr><td>{i}</td><td>{_html.escape(etf['name'])}</td>"
+                f"<td>{etf['ticker']}</td><td style='text-align:right'>{etf['price']:,.0f}</td>"
+                f"<td class='{d1_cls}'>{d1_icon}{abs(etf['d1']):.2f}%</td>"
+                f"<td class='{d5_cls}'>{d5_icon}{abs(etf['d5']):.2f}%</td>"
+                f"<td class='{d20_cls}'>{d20_icon}{abs(etf['d20']):.2f}%</td>"
+                f"<td style='font-size:11px'>{' / '.join(etf['holdings'][:3])}</td></tr>"
+            )
+        china_html = (
+            "<table style='width:100%;border-collapse:collapse;font-size:12px'>"
+            "<tr style='background:#f0f0f0'><th>#</th><th>ETF명</th><th>티커</th>"
+            "<th>현재가</th><th>전일</th><th>5일</th><th>20일</th><th>주요 구성</th></tr>"
+            + "".join(rows) + "</table>"
+            "<div style='margin-top:6px;font-size:11px;color:#c00'>⚠️ 중국 ETF 리스크: 위안화 환율 변동성 / 중국 정책 리스크 / 지리적 긴장</div>"
+        )
+        sections.append(section("🇨🇳 중국 ETF 추천 TOP 5 (모멘텀 기준)", china_html))
 
     # 성과 요약 (있을 때만)
     if perf_summary:
@@ -1370,22 +2085,18 @@ def send_email(report_text: str, html_report: str = ""):
         print("[이메일] EMAIL_USER / EMAIL_PASS 미설정 — 건너뜀")
         return
     try:
-        msg = MIMEMultipart("alternative")
+        msg = MIMEText(report_text, "plain", "utf-8")
         msg["Subject"] = (
             f"📊 AI 주식 v4 {datetime.datetime.now().strftime('%Y-%m-%d')} "
             f"| 기술+펀더멘털+Fear&Greed"
         )
         msg["From"] = EMAIL_FROM
         msg["To"]   = EMAIL_TO
-        # plain text 먼저 (폴백), HTML 나중에 (이메일 클라이언트가 마지막 part를 선호)
-        msg.attach(MIMEText(report_text, "plain", "utf-8"))
-        if html_report:
-            msg.attach(MIMEText(html_report, "html", "utf-8"))
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as srv:
             srv.starttls()
             srv.login(EMAIL_USER, EMAIL_PASS)
             srv.sendmail(EMAIL_FROM, EMAIL_TO, msg.as_string())
-        print(f"[이메일] ✅ {EMAIL_TO} HTML+Text 발송 완료")
+        print(f"[이메일] ✅ {EMAIL_TO} 텍스트 발송 완료")
     except Exception as e:
         print(f"[이메일] ❌ 실패: {e}")
 
@@ -1481,42 +2192,32 @@ def main():
         print("   ✓ 펀더멘털 점수 반영 완료")
         _save_screening_cache(all_results)
 
-    # ③ 최종 매수/매도 선별
-    kospi_buy   = all_results["KOSPI"][:RECOMMEND_COUNT["KOSPI"]]
-    kosdaq_buy  = all_results["KOSDAQ"][:RECOMMEND_COUNT["KOSDAQ"]]
-    us_buy      = all_results["US"][:RECOMMEND_COUNT["US"]]
-    kospi_sell  = all_results["KOSPI"][-SELL_COUNT["KOSPI"]:][::-1]
-    kosdaq_sell = all_results["KOSDAQ"][-SELL_COUNT["KOSDAQ"]:][::-1]
-    us_sell     = all_results["US"][-SELL_COUNT["US"]:][::-1]
-
-    total_valid = sum(len(v) for v in all_results.values())
-    print(f"\n   ✅ 총 {total_valid}개 유효 종목")
-    print(f"   매수: 코스피 {len(kospi_buy)} | 코스닥 {len(kosdaq_buy)} | 미국 {len(us_buy)}")
-    print(f"   매도: 코스피 {len(kospi_sell)} | 코스닥 {len(kosdaq_sell)} | 미국 {len(us_sell)}")
-
-    # ③-a 외부 변수 로드
-    external_events = load_external_events()
-    if external_events:
-        print(f"\n   외부 변수 {len(external_events)}개 로드됨:")
-        for ev in external_events:
-            print(f"   · [{ev['category']}] {ev['title']} → {ev['impact']}")
-    else:
-        print("\n   외부 변수 없음 (추가: python external_events.py add)")
-
-    # ④ 보조 데이터 수집 (병렬)
-    print("\n③ 거시·심리·섹터·뉴스 수집...")
-    macro = overseas = fear_greed = sector_flows = news = None
+    # ③ 보조 데이터 수집 (병렬, 항상 신규 수집 — 재시도 2회) — 선별 전 실시
+    print("\n③ 거시·심리·섹터·뉴스 수집 (실시간, 선별 전)...")
     results_bag = {}
+    _EMPTY = {"macro": {}, "fear": {}, "sector": {}, "overseas": {}, "news": [], "kr_etf": [], "china_etf": []}
 
-    def _collect(key, fn, *args):
-        results_bag[key] = fn(*args)
+    def _collect_with_retry(key, fn, retries=2):
+        empty = _EMPTY[key]
+        for attempt in range(retries):
+            try:
+                result = fn()
+                if result:
+                    results_bag[key] = result
+                    return
+            except Exception:
+                pass
+        results_bag[key] = empty
+        print(f"   ⚠️ [{key}] 수집 실패 — {retries}회 재시도 후 빈 데이터")
 
     threads = [
-        threading.Thread(target=_collect, args=("macro",   collect_macro)),
-        threading.Thread(target=_collect, args=("fear",    collect_fear_greed)),
-        threading.Thread(target=_collect, args=("sector",  collect_sector_flows)),
-        threading.Thread(target=_collect, args=("overseas",collect_overseas_snapshot)),
-        threading.Thread(target=_collect, args=("news",    collect_news)),
+        threading.Thread(target=_collect_with_retry, args=("macro",    collect_macro)),
+        threading.Thread(target=_collect_with_retry, args=("fear",     collect_fear_greed)),
+        threading.Thread(target=_collect_with_retry, args=("sector",   collect_sector_flows)),
+        threading.Thread(target=_collect_with_retry, args=("overseas", collect_overseas_snapshot)),
+        threading.Thread(target=_collect_with_retry, args=("news",     collect_news)),
+        threading.Thread(target=_collect_with_retry, args=("kr_etf",   collect_kr_etf_picks)),
+        threading.Thread(target=_collect_with_retry, args=("china_etf", collect_china_etf_picks)),
     ]
     for t in threads: t.start()
     for t in threads: t.join()
@@ -1526,37 +2227,195 @@ def main():
     sector_flows = results_bag.get("sector", {})
     overseas     = results_bag.get("overseas", {})
     news         = results_bag.get("news", [])
+    kr_etf_picks = results_bag.get("kr_etf", [])
+    china_etf_picks = results_bag.get("china_etf", [])
 
-    fg_str = f"Fear&Greed:{fear_greed.get('지수','?')}" if fear_greed else "Fear&Greed:없음"
+    # 수집 결과 검증
+    fg_str = f"Fear&Greed:{fear_greed.get('지수','?')}" if fear_greed else "Fear&Greed:❌미수집"
     print(f"   거시 {len(macro)}개 | {fg_str} | 섹터ETF {len(sector_flows)}개 | 뉴스 {len(news)}건")
+    if not macro:      print("   ⚠️ 거시지표 미수집 — Claude 분석 정확도 저하 가능")
+    if not fear_greed: print("   ⚠️ Fear&Greed 미수집 — Claude 분석 정확도 저하 가능")
 
-    # ⑤ Claude 심층 분석
-    print("\n④ Claude 심층 분석 요청...")
+    # ③-b 거시 레짐 평가 → 전 종목 점수 보정
+    print("\n③-b 거시 레짐 평가...")
+    macro_regime = compute_macro_regime(macro, fear_greed, sector_flows)
+    adj = macro_regime["score_adjustment"]
+
+    # 과거 승률 피드백 — DB에서 5일 매수 승률 조회해 추가 보정
+    try:
+        from performance_tracker import verify_past_recommendations
+        _vr = verify_past_recommendations()
+        _p5 = _vr.get("by_period", {}).get(5, {})
+        buy_wr_hist  = _p5.get("buy_win_rate",  50.0)
+        sell_wr_hist = _p5.get("sell_win_rate", 50.0)
+        macro_regime["buy_win_rate"]  = buy_wr_hist
+        macro_regime["sell_win_rate"] = sell_wr_hist
+        if buy_wr_hist < 40:
+            adj -= 5
+            macro_regime["reasons"].append(f"최근 5일 매수승률 {buy_wr_hist:.0f}% → 추가 -5")
+        if sell_wr_hist > 65:
+            adj -= 3   # 전체 score 하향 → sell pool 강화
+            macro_regime["reasons"].append(f"최근 5일 매도승률 {sell_wr_hist:.0f}% → 추가 -3")
+    except Exception:
+        macro_regime["buy_win_rate"]  = None
+        macro_regime["sell_win_rate"] = None
+
+    macro_regime["applied_adjustment"] = adj
+    print(f"   레짐: {macro_regime['regime']} (레짐점수:{macro_regime['regime_score']:+d}"
+          f", 점수보정:{adj:+d})")
+    for r in macro_regime["reasons"]:
+        print(f"   · {r}")
+
+    if adj != 0:
+        for market in all_results:
+            for r in all_results[market]:
+                r["score"] = r["score"] + adj
+            all_results[market].sort(key=lambda x: x["score"], reverse=True)
+        print(f"   ✓ 전 종목 점수 {adj:+d}점 보정 완료")
+
+    # ④ 외부 변수 로드
+    external_events = load_external_events()
+    if external_events:
+        print(f"\n   외부 변수 {len(external_events)}개 로드됨:")
+        for ev in external_events:
+            print(f"   · [{ev['category']}] {ev['title']} → {ev['impact']}")
+    else:
+        print("\n   외부 변수 없음 (추가: python external_events.py add)")
+
+    # ④-a 유명 투자자 포트폴리오 수집 → 선별 전 가산점 반영
+    print("\n④ 유명 투자자 포트폴리오 + 국내 테마 수집 (선별 전)...")
+    investor_summary = collect_investor_summary()
+    if investor_summary:
+        print(f"   ✓ 투자자 {len(investor_summary)}명 포트폴리오 로드")
+        # 투자자 관심 종목 세트 (단축 티커, e.g. 'NVDA', '005930')
+        investor_tickers: set = set()
+        for inv, picks in investor_summary.items():
+            for t, note, w in picks:
+                investor_tickers.add(t.upper())
+        # 가산점 +5 부여 후 재정렬
+        boosted = 0
+        for market in all_results:
+            for r in all_results[market]:
+                tk_base = r["ticker"].split(".")[0].upper()
+                if tk_base in investor_tickers or r["ticker"].upper() in investor_tickers:
+                    r["score"] = r["score"] + 5
+                    boosted += 1
+            all_results[market].sort(key=lambda x: x["score"], reverse=True)
+        if boosted:
+            print(f"   ✓ 투자자 관심 종목 {boosted}개 가산점(+5) 반영 → 풀 재정렬")
+
+    # ④-b 국내 테마별 상위 종목 추출
+    theme_picks = get_theme_picks(all_results)
+    if theme_picks:
+        print(f"   ✓ 국내 테마 {len(theme_picks)}개 상위 종목 추출")
+
+    # ④-c IPO 신규상장 가산점 (+10) — 데이터 부족 불이익 보완
+    if all_results.get("IPO"):
+        for r in all_results["IPO"]:
+            r["score"] = r["score"] + 10
+        all_results["IPO"].sort(key=lambda x: x["score"], reverse=True)
+        print(f"   ✓ 신규상장 IPO {len(all_results['IPO'])}개 +10점 보정")
+
+    # ⑤ Claude 심층 분석 — 최종 선별 전, 확대 후보군(TOP 10) 기반
+    _PRE_N = {"KOSPI": 10, "KOSDAQ": 6, "US": 10}
+    total_valid = sum(len(v) for k, v in all_results.items() if k != "IPO")
+    print(f"\n⑤ Claude 심층 분석 (총 {total_valid}개 유효 종목 중 확대 후보 분석)...")
+    kospi_pre      = all_results["KOSPI"][:_PRE_N["KOSPI"]]
+    kosdaq_pre     = all_results["KOSDAQ"][:_PRE_N["KOSDAQ"]]
+    us_pre         = all_results["US"][:_PRE_N["US"]]
+    ipo_pre        = all_results.get("IPO", [])[:8]  # Claude 분석 별도 — 점수순 선별
+    kospi_sell_pre  = all_results["KOSPI"][-_PRE_N["KOSPI"]:][::-1]
+    kosdaq_sell_pre = all_results["KOSDAQ"][-_PRE_N["KOSDAQ"]:][::-1]
+    us_sell_pre     = all_results["US"][-_PRE_N["US"]:][::-1]
+
     claude_opinion = ask_claude_v4(
-        kospi_buy, kosdaq_buy, us_buy,
-        kospi_sell, kosdaq_sell, us_sell,
+        kospi_pre, kosdaq_pre, us_pre,
+        kospi_sell_pre, kosdaq_sell_pre, us_sell_pre,
         macro, news, overseas, fear_greed, sector_flows,
-        external_events=external_events
+        external_events=external_events,
+        investor_summary=investor_summary,
+        theme_picks=theme_picks,
     )
+
+    # ⑥ 최종 선별 — Claude 추천 종목에 보너스 반영 후 종합점수 순 정렬
+    # ─────────────────────────────────────────────────────────────────
+    # 순위 결정 단일 기준: 종합점수 = 기술점수 + 펀더멘털 + 레짐보정 + 투자자가산 + Claude보너스
+    # Claude 추천 종목: +20점 보너스 추가 후 재정렬 → 점수가 곧 순위의 근거
+    # Claude 미추천 슬롯: 보너스 없이 점수순으로 자연스럽게 편입
+    # ─────────────────────────────────────────────────────────────────
+    print("\n⑥ 최종 선별 (Claude 보너스 반영 → 종합점수 순 정렬)...")
+    claude_buy_tickers  = [x["ticker"] for x in _last_claude_structured.get("top_buy",  [])]
+    claude_sell_tickers = [x["ticker"] for x in _last_claude_structured.get("top_sell", [])]
+    _CLAUDE_BUY_BONUS  = 20   # Claude 매수 추천 가산점
+    _CLAUDE_SELL_BONUS = 20   # Claude 매도 추천 가산점
+
+    def _apply_claude_bonus(pool: list, claude_tickers: list, bonus: int) -> list:
+        """Claude 추천 종목에 보너스 추가 후 종합점수 내림차순 재정렬.
+        rank_source 필드: 'Claude추천' | '점수순' — 리포트 순위 근거 표시용."""
+        claude_set = set(claude_tickers)
+        for r in pool:
+            if r["ticker"] in claude_set:
+                r["score"]       = r["score"] + bonus
+                r["rank_source"] = "Claude추천"
+            else:
+                r.setdefault("rank_source", "점수순")
+        return sorted(pool, key=lambda x: x["score"], reverse=True)
+
+    kospi_pre       = _apply_claude_bonus(kospi_pre,       claude_buy_tickers,  _CLAUDE_BUY_BONUS)
+    kosdaq_pre      = _apply_claude_bonus(kosdaq_pre,      claude_buy_tickers,  _CLAUDE_BUY_BONUS)
+    us_pre          = _apply_claude_bonus(us_pre,          claude_buy_tickers,  _CLAUDE_BUY_BONUS)
+    ipo_pre         = _apply_claude_bonus(ipo_pre,         claude_buy_tickers,  _CLAUDE_BUY_BONUS)
+    kospi_sell_pre  = _apply_claude_bonus(kospi_sell_pre,  claude_sell_tickers, _CLAUDE_SELL_BONUS)
+    kosdaq_sell_pre = _apply_claude_bonus(kosdaq_sell_pre, claude_sell_tickers, _CLAUDE_SELL_BONUS)
+    us_sell_pre     = _apply_claude_bonus(us_sell_pre,     claude_sell_tickers, _CLAUDE_SELL_BONUS)
+
+    _MIN_BUY_SCORE = 40
+    kospi_buy   = [r for r in kospi_pre  if r["score"] >= _MIN_BUY_SCORE][:RECOMMEND_COUNT["KOSPI"]]
+    kosdaq_buy  = [r for r in kosdaq_pre if r["score"] >= _MIN_BUY_SCORE][:RECOMMEND_COUNT["KOSDAQ"]]
+    us_buy      = [r for r in us_pre     if r["score"] >= _MIN_BUY_SCORE][:RECOMMEND_COUNT["US"]]
+    # IPO: 데이터 부족으로 점수 임계값 없이 상위 5개 선정 (점수순 정렬)
+    ipo_buy     = ipo_pre[:5]
+    kospi_sell  = kospi_sell_pre[:SELL_COUNT["KOSPI"]]
+    kosdaq_sell = kosdaq_sell_pre[:SELL_COUNT["KOSDAQ"]]
+    us_sell     = us_sell_pre[:SELL_COUNT["US"]]
+
+    claude_cnt = sum(1 for r in kospi_buy + kosdaq_buy + us_buy
+                     if r.get("rank_source") == "Claude추천")
+    score_cnt  = sum(1 for r in kospi_buy + kosdaq_buy + us_buy
+                     if r.get("rank_source") == "점수순")
+    if claude_buy_tickers:
+        print(f"   Claude 보너스(+{_CLAUDE_BUY_BONUS}) 적용: Claude추천 {claude_cnt}개 / 점수순 {score_cnt}개")
+    else:
+        print("   Claude JSON 없음 — 점수 순 유지")
+    print(f"   매수: 코스피 {len(kospi_buy)} | 코스닥 {len(kosdaq_buy)} | 미국 {len(us_buy)} | IPO {len(ipo_buy)}")
+    print(f"   매도: 코스피 {len(kospi_sell)} | 코스닥 {len(kosdaq_sell)} | 미국 {len(us_sell)}")
 
     # ⑥ 리포트 저장
     report = build_report(
         kospi_buy, kosdaq_buy, us_buy,
         kospi_sell, kosdaq_sell, us_sell,
         {k: len(v) for k, v in all_results.items()},
-        fear_greed, claude_opinion
+        fear_greed, claude_opinion,
+        investor_summary=investor_summary,
+        theme_picks=theme_picks,
+        macro_regime=macro_regime,
+        kr_etf_picks=kr_etf_picks,
+        china_etf_picks=china_etf_picks,
+        ipo_buy=ipo_buy,
     )
     with open(REPORT_PATH, "w", encoding="utf-8") as f:
         f.write(report)
-    print(f"⑤ 리포트 저장: {REPORT_PATH}")
+    print(f"⑦ 리포트 저장: {REPORT_PATH}")
 
-    # ⑦ 성능 추적 + 성과 요약
+    # 성능 추적 + 성과 요약
     perf_summary = ""
-    print("\n⑤ 성능 추적 업데이트...")
+    verification_section = ""
+    print("\n⑧ 성능 추적 업데이트...")
     try:
         from performance_tracker import (
             init_database, save_daily_recommendations,
             update_price_tracking, generate_performance_report,
+            format_verification_section,
         )
         init_database()
         today_str = datetime.datetime.now().strftime("%Y-%m-%d")
@@ -1564,13 +2423,34 @@ def main():
             "kospi_buy": kospi_buy, "kospi_sell": kospi_sell,
             "kosdaq_buy": kosdaq_buy, "kosdaq_sell": kosdaq_sell,
             "us_buy": us_buy, "us_sell": us_sell,
+            "ipo_buy": ipo_buy,
         })
+        # 먼저 누락된 day_after를 채운 뒤 성과 리포트 생성
         update_price_tracking()
         # 30일 성과 요약 생성
         perf_summary = generate_performance_report(30)
         perf_path = os.path.join(BASE_DIR, "performance_report.txt")
         with open(perf_path, "w", encoding="utf-8") as f:
             f.write(perf_summary)
+        # 추천 검증 섹션 생성 후 리포트에 반영
+        verification_section = format_verification_section()
+        if verification_section:
+            updated_report = build_report(
+                kospi_buy, kosdaq_buy, us_buy,
+                kospi_sell, kosdaq_sell, us_sell,
+                {k: len(v) for k, v in all_results.items()},
+                fear_greed, claude_opinion,
+                investor_summary=investor_summary,
+                theme_picks=theme_picks,
+                verification_section=verification_section,
+                macro_regime=macro_regime,
+                kr_etf_picks=kr_etf_picks,
+                china_etf_picks=china_etf_picks,
+                ipo_buy=ipo_buy,
+            )
+            with open(REPORT_PATH, "w", encoding="utf-8") as f:
+                f.write(updated_report)
+            report = updated_report
         print(f"   ✓ 성능 추적 완료 / 성과 리포트: {perf_path}")
     except Exception as e:
         print(f"   ⚠️ 성능 추적 실패: {e}")
@@ -1582,14 +2462,17 @@ def main():
         {k: len(v) for k, v in all_results.items()},
         fear_greed, claude_opinion,
         perf_summary=perf_summary,
+        ipo_buy=ipo_buy,
+        kr_etf_picks=kr_etf_picks,
+        china_etf_picks=china_etf_picks,
     )
     html_path = os.path.join(BASE_DIR, "report_v4.html")
     with open(html_path, "w", encoding="utf-8") as f:
         f.write(html_report)
-    print(f"⑥ HTML 리포트 저장: {html_path}")
+    print(f"⑨ HTML 리포트 저장: {html_path}")
 
-    # ⑨ 알림 발송
-    print("\n⑦ 알림 발송...")
+    # 알림 발송
+    print("\n⑩ 알림 발송...")
     send_email(report, html_report=html_report)
     send_telegram(kospi_buy, kosdaq_buy, us_buy, kospi_sell, kosdaq_sell, us_sell, fear_greed)
 

@@ -338,6 +338,126 @@ US_ETF_POOL = {
 }
 
 
+# 중국 ETF (KRX 상장 — 한국 증권사 판매)
+CHINA_ETF_POOL = {
+    # ── 지수형 (A주·H주 벤치마크) ────────────────────────────────
+    "TIGER 차이나CSI300": {
+        "ticker": "192090.KS",
+        "category": "지수형/A주",
+        "description": "중국 A주 시가총액 상위 300개 (CSI300 추종)",
+        "reason": "중국 경기부양·금리 인하 정책 수혜, 대형주 안정성",
+        "risk": "중급",
+        "weight_recommend": 25,
+    },
+    "KODEX 차이나H주": {
+        "ticker": "099140.KS",
+        "category": "지수형/H주",
+        "description": "홍콩 상장 중국 H주 블루칩 (항셍중국기업지수)",
+        "reason": "홍콩 달러 분산·환율 헷지, 우량 국유기업 중심",
+        "risk": "중급",
+        "weight_recommend": 10,
+    },
+    "KINDEX 중국본토CSI300": {
+        "ticker": "168580.KS",
+        "category": "지수형/A주",
+        "description": "CSI300 합성 복제 (저보수)",
+        "reason": "CSI300 저비용 추종, TIGER와 분산 효과",
+        "risk": "중급",
+        "weight_recommend": 0,   # TIGER CSI300과 중복 — 단독 보유 시 활용
+    },
+    "KODEX 차이나CSI300합성": {
+        "ticker": "310080.KS",
+        "category": "지수형/A주",
+        "description": "CSI300 SWAP 합성 ETF",
+        "reason": "SWAP 구조로 직접 투자 제한 종목 편입 가능",
+        "risk": "중급",
+        "weight_recommend": 0,
+    },
+    "TIGER 차이나항셍H주": {
+        "ticker": "152280.KS",
+        "category": "지수형/H주",
+        "description": "홍콩 항셍 H주 25 블루칩 집중",
+        "reason": "중국 빅4 은행·보험·에너지 등 초대형 국유주 포함",
+        "risk": "중급",
+        "weight_recommend": 0,
+    },
+    "KBSTAR 중국본토대형주CSI100": {
+        "ticker": "304850.KS",
+        "category": "지수형/A주",
+        "description": "CSI100 초대형주 집중 (상위 100개)",
+        "reason": "CSI300 대비 더 집중된 우량 대형주 포트폴리오",
+        "risk": "중급",
+        "weight_recommend": 0,
+    },
+    # ── 테마형 ──────────────────────────────────────────────────
+    "KODEX 차이나항셍테크": {
+        "ticker": "371160.KS",
+        "category": "테마형/테크",
+        "description": "홍콩 상장 중국 테크 30종목 (항셍테크지수)",
+        "reason": "알리바바·텐센트·메이투안·Meituan 등 AI·핀테크 수혜",
+        "risk": "중상급",
+        "weight_recommend": 30,
+    },
+    "TIGER 차이나전기차": {
+        "ticker": "305540.KS",
+        "category": "테마형/EV",
+        "description": "BYD·CATL·NIO·Li Auto 등 중국 EV 밸류체인",
+        "reason": "중국 EV 글로벌 점유율 60%+, 배터리 수출 급성장",
+        "risk": "중상급",
+        "weight_recommend": 20,
+    },
+    "TIGER 차이나CSI500": {
+        "ticker": "192720.KS",
+        "category": "테마형/중소형",
+        "description": "중국 중소형 성장주 500개 (CSI500 추종)",
+        "reason": "내수 소비 회복 수혜, 대형주 대비 성장 프리미엄",
+        "risk": "중상급",
+        "weight_recommend": 15,
+    },
+    "ACE 중국본토CSI300": {
+        "ticker": "420330.KS",
+        "category": "지수형/A주",
+        "description": "한화자산운용 CSI300 직접 복제",
+        "reason": "직접 복제 방식으로 추적오차 최소화",
+        "risk": "중급",
+        "weight_recommend": 0,
+    },
+    "KODEX 차이나과창판STAR50합성": {
+        "ticker": "391600.KS",
+        "category": "테마형/혁신",
+        "description": "상하이 과학혁신판(STAR Market) 상위 50종목",
+        "reason": "중국 반도체·바이오·AI 스타트업 상장 플랫폼, 고성장",
+        "risk": "상급",
+        "weight_recommend": 0,
+    },
+    "TIGER 차이나소비테마": {
+        "ticker": "290130.KS",
+        "category": "테마형/소비",
+        "description": "중국 내수 소비 관련 기업 집중",
+        "reason": "중국 중산층 확대, 소비 업그레이드 트렌드",
+        "risk": "중상급",
+        "weight_recommend": 0,
+    },
+}
+
+# ─────────────────────────────────────────────────────────────────
+# ★ 최종 추천 5개 및 비중 (2026년 3월 기준)
+# ─────────────────────────────────────────────────────────────────
+CHINA_ETF_TOP5 = {
+    "KODEX 차이나항셍테크":  {"ticker": "371160.KS", "weight": 30,
+                               "reason": "DeepSeek AI 모멘텀·홍콩 테크 반등 선도"},
+    "TIGER 차이나CSI300":    {"ticker": "192090.KS", "weight": 25,
+                               "reason": "중국 정부 경기부양 정책 직수혜 벤치마크"},
+    "TIGER 차이나전기차":    {"ticker": "305540.KS", "weight": 20,
+                               "reason": "BYD·CATL 글로벌 점유율 확대 지속"},
+    "TIGER 차이나CSI500":    {"ticker": "192720.KS", "weight": 15,
+                               "reason": "중소형 성장주로 대형주 대비 알파 기대"},
+    "KODEX 차이나H주":       {"ticker": "099140.KS", "weight": 10,
+                               "reason": "H주 블루칩으로 변동성 완충 + 환율 분산"},
+}
+# 합계: 100%
+
+
 # ═══════════════════════════════════════════════════════════════
 # ETF 데이터 수집
 # ═══════════════════════════════════════════════════════════════
@@ -408,7 +528,24 @@ def collect_all_etf_data() -> tuple:
             print(f"완료 ({data['price']:,.0f}원, 1 년: {data['ret_1y']:+.1f}%)")
         else:
             print("실패")
-    
+
+    print("\n📊 중국 ETF 데이터 수집 중...")
+    china_data = []
+    for name, info in CHINA_ETF_POOL.items():
+        print(f"  수집: {name}...", end=" ")
+        data = fetch_etf_data(info["ticker"])
+        if data:
+            data["category"] = info["category"]
+            data["description"] = info["description"]
+            data["reason"] = info["reason"]
+            data["risk"] = info["risk"]
+            data["etf_name"] = name
+            data["weight_recommend"] = info.get("weight_recommend", 0)
+            china_data.append(data)
+            print(f"완료 ({data['price']:,.0f}원, 1 년: {data['ret_1y']:+.1f}%)")
+        else:
+            print("실패")
+
     print("\n📊 미국 ETF 데이터 수집 중...")
     us_data = []
     for name, info in US_ETF_POOL.items():
@@ -424,8 +561,8 @@ def collect_all_etf_data() -> tuple:
             print(f"완료 (${data['price']:,.2f}, 1 년: {data['ret_1y']:+.1f}%)")
         else:
             print("실패")
-    
-    return korea_data, us_data
+
+    return korea_data, us_data, china_data
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -496,7 +633,53 @@ def get_etf_holdings(ticker: str) -> list:
 # 보고서 생성
 # ═══════════════════════════════════════════════════════════════
 
-def build_etf_recommendation_report(korea_data: list, us_data: list) -> str:
+def build_china_etf_section(china_data: list) -> str:
+    """중국 ETF 추천 섹션 (TOP5 + 전체 풀)을 생성한다."""
+    lines = []
+    lines.append("\n\n" + "═" * 90)
+    lines.append("  🇨🇳 중국 ETF 추천 (KRX 상장 — 한국 증권사 판매)")
+    lines.append("═" * 90)
+
+    # TOP 5 비중 표
+    lines.append("\n  ★ 추천 5선 & 투자 비중 (2026.03 기준)")
+    lines.append("  " + "─" * 88)
+    lines.append(f"  {'순위':>3} {'ETF명':<24} {'티커':<14} {'비중':>6}  {'선정 이유'}")
+    lines.append("  " + "─" * 88)
+    for rank, (name, info) in enumerate(CHINA_ETF_TOP5.items(), 1):
+        lines.append(f"  {rank:>3}. {name:<24} {info['ticker']:<14} {info['weight']:>5}%  {info['reason']}")
+    lines.append("  " + "─" * 88)
+    lines.append("       합계                                       100%")
+
+    # 실시간 성과 테이블 (수집된 데이터)
+    if china_data:
+        lines.append(f"\n  전체 풀 성과 현황 (수집 완료 {len(china_data)}개)")
+        lines.append(f"  {'ETF명':<24} {'티커':<14} {'현재가':>10} {'1M':>7} {'3M':>7} {'6M':>7} {'1Y':>7}")
+        lines.append("  " + "─" * 88)
+        for etf in sorted(china_data, key=lambda x: x.get("ret_1y", 0), reverse=True):
+            name = etf.get("etf_name", "")[:22]
+            ticker = etf.get("ticker", "")
+            price = f"{etf.get('price', 0):>10,.0f}"
+            r1m = f"{etf.get('ret_1m', 0):>+6.1f}%" if etf.get("ret_1m") else "   N/A"
+            r3m = f"{etf.get('ret_3m', 0):>+6.1f}%" if etf.get("ret_3m") else "   N/A"
+            r6m = f"{etf.get('ret_6m', 0):>+6.1f}%" if etf.get("ret_6m") else "   N/A"
+            r1y = f"{etf.get('ret_1y', 0):>+6.1f}%"
+            lines.append(f"  {name:<24} {ticker:<14} {price} {r1m} {r3m} {r6m} {r1y}")
+
+    lines.append("""
+  [포트폴리오 전략 가이드]
+  • 공격형  : 항셍테크40% + CSI300 20% + EV 20% + CSI500 20%
+  • 균형형  : 항셍테크30% + CSI300 25% + EV 20% + CSI500 15% + H주 10%  ← 추천
+  • 방어형  : CSI300 40% + H주 30% + EV 20% + CSI500 10%
+
+  [리스크 주의]
+  • 중국 본토 A주 ETF: 위안화 환율 변동성 노출
+  • 홍콩 H주/테크 ETF: HKD 환율 + 미중 규제 리스크 이중 노출
+  • 과창판STAR50: 상장 초기 기업 多 — 변동성 매우 높음
+""")
+    return "\n".join(lines)
+
+
+def build_etf_recommendation_report(korea_data: list, us_data: list, china_data: list = None) -> str:
     """
     ETF 추천 보고서를 생성한다.
     """
@@ -556,19 +739,29 @@ def build_etf_recommendation_report(korea_data: list, us_data: list) -> str:
             
             lines.append(f"  {name:<25} {ticker:<10} {price:>10} {r1m:>7} {r3m:>7} {r6m:>7} {r1y:>7} {reason:<28}")
     
+    # 중국 ETF 섹션
+    if china_data:
+        lines.append(build_china_etf_section(china_data))
+
     # 종합 TOP 10
     lines.append("\n\n" + "═" * 90)
     lines.append("  🏆 종합 TOP 10 ETF (1 년 수익률 기준)")
     lines.append("═" * 90)
-    
-    all_etfs = korea_data + us_data
+
+    all_etfs = korea_data + us_data + (china_data or [])
     all_sorted = sorted(all_etfs, key=lambda x: x.get("ret_1y", 0), reverse=True)[:10]
     
     lines.append(f"\n  {'순위':>4} {'국가':>4} {'ETF 명':<25} {'티커':<10} {'1Y':>8} {'3M':>8} {'AUM':>12} {'추천이유':<30}")
     lines.append("  " + "-" * 130)
     
     for i, etf in enumerate(all_sorted, 1):
-        country = "🇰🇷" if ".KS" in etf.get("ticker", "") else "🇺🇸"
+        ticker_val = etf.get("ticker", "")
+        if ticker_val in [v["ticker"] for v in CHINA_ETF_TOP5.values()]:
+            country = "🇨🇳"
+        elif ".KS" in ticker_val:
+            country = "🇰🇷"
+        else:
+            country = "🇺🇸"
         name = etf.get("etf_name", "")[:23]
         ticker = etf.get("ticker", "")
         r1y = f"{etf.get('ret_1y', 0):>+7.1f}%"
@@ -627,20 +820,21 @@ def build_etf_recommendation_report(korea_data: list, us_data: list) -> str:
 # ═══════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    print("\n🇰🇷🇺🇸 한미 유망 ETF 분석 시작...\n")
-    
+    print("\n🇰🇷🇺🇸🇨🇳 한미중 유망 ETF 분석 시작...\n")
+
     # 데이터 수집
-    korea_data, us_data = collect_all_etf_data()
-    
-    if not korea_data and not us_data:
+    korea_data, us_data, china_data = collect_all_etf_data()
+
+    if not korea_data and not us_data and not china_data:
         print("수집된 데이터가 없습니다.")
         sys.exit(1)
-    
+
     print(f"\n✅ 한국 ETF: {len(korea_data)}개 수집 완료")
     print(f"✅ 미국 ETF: {len(us_data)}개 수집 완료")
-    
+    print(f"✅ 중국 ETF: {len(china_data)}개 수집 완료")
+
     # 보고서 생성
-    report = build_etf_recommendation_report(korea_data, us_data)
+    report = build_etf_recommendation_report(korea_data, us_data, china_data)
     print(report)
     
     # 저장
