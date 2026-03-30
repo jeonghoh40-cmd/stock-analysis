@@ -131,11 +131,10 @@ UNIVERSE: dict = {
         "KODEX 차이나CSI300합성":   "310080.KS",  # CSI300 SWAP 합성
         # 추가 6개 (확장 풀)
         "TIGER 차이나CSI500":       "192720.KS",  # 중국 중소형 성장주 500
-        "TIGER 차이나항셍H주":      "152280.KS",  # 홍콩 항셍 H주 25 블루칩
-        "ACE 중국본토CSI300":       "420330.KS",  # 한화자산 중국본토 CSI300
+        # "TIGER 차이나항셍H주" (152280.KS), "ACE 중국본토CSI300" (420330.KS) — 상폐/yfinance 미지원으로 제거
         "KODEX 차이나과창판STAR50합성": "391600.KS", # 상하이 과학혁신판 STAR50
         "TIGER 차이나소비테마":     "290130.KS",  # 중국 내수 소비 섹터
-        "KBSTAR 중국본토대형주CSI100": "304850.KS", # CSI100 대형주 집중
+        # "KBSTAR 중국본토대형주CSI100" (304850.KS) — yfinance 미지원으로 제거
     },
 
     # ─── 국내 섹터·테마 ETF (KRX 상장) ──────────────────────────────
@@ -146,7 +145,7 @@ UNIVERSE: dict = {
         "KODEX 헬스케어":         "266410.KS",
         "KODEX 에너지화학":       "117460.KS",
         "TIGER AI반도체핵심공정": "396520.KS",
-        "TIGER K방산":            "457400.KS",
+        "TIGER K방산&우주":       "463250.KS",
         "TIGER 조선TOP10":        "466920.KS",
         "KODEX 은행":             "091170.KS",
         "TIGER 미디어컨텐츠":     "227550.KS",
@@ -159,7 +158,7 @@ UNIVERSE: dict = {
         "원익IPS":      "240810.KQ",  "피에스케이":   "319660.KQ",
         "하나마이크론": "067310.KQ",  "나노신소재":   "121600.KQ",
         # 2차전지 소재
-        "엘앤에프":     "066970.KQ",  "천보":         "278280.KQ",
+        "엘앤에프":     "066970.KS",  "천보":         "278280.KQ",
         "솔브레인":     "357780.KQ",  "동화기업":     "025900.KQ",
         # 바이오·헬스케어
         "HLB":          "028300.KQ",  "알테오젠":     "196170.KQ",
@@ -430,7 +429,7 @@ def get_recent_ipos(days: int = 180) -> dict:
 DELIST_BLACKLIST: set = {
     "068670.KS",   # 상장폐지 확인
     "426260.KQ",   # 상장폐지 확인
-    "457400.KS",   # TIGER K방산 — yfinance 데이터 없음
+    "457400.KS",   # 구 TIGER K방산 코드 — 463250으로 변경됨
 }
 
 SELL_POOL: dict = {}  # {ticker: detected_date}  — 유동성 급감 종목
@@ -445,7 +444,7 @@ def check_liquidity_drop(ticker: str) -> bool:
     데이터 부족·API 오류 시 False 반환 (안전 방향).
     """
     try:
-        df = yf.download(ticker, period="25d", progress=False, auto_adjust=True)
+        df = yf.Ticker(ticker).history(period="25d", timeout=10)
         vol = df["Volume"].dropna()
         if len(vol) < _LIQUIDITY_LOOKBACK + 5:
             return False

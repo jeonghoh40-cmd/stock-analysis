@@ -1,57 +1,249 @@
 """
-Streamlit 대시보드 — AI 주식 스크리닝 히스토리 뷰어
-────────────────────────────────────────────────────
+Streamlit 대시보드 v2 — AI 주식 스크리닝 (stock_performance.db 기반)
+────────────────────────────────────────────────────────────────────
 실행:  streamlit run dashboard.py
 접속:  http://localhost:8501
 
 탭 구성:
-  📋 오늘의 추천  — 가장 최근 매수/매도 TOP10
-  📈 백테스팅     — 최근 N일 수익률 분석
-  🗂️  히스토리    — 날짜별 과거 추천 조회
+  📋 오늘의 추천   — v4 최신 매수/매도 (KOSPI·KOSDAQ·US)
+  📊 성능 분석     — 기간별 승률·점수구간·최근 HIT/MISS
+  🗂️ 히스토리     — 날짜 × 시장 × 신호 조합 조회
+  🎯 ARK 추천      — ARK Big Ideas 2026
+  ⚠️ Citrini       — 2028 부정적 종목
 """
 
 import os
 import sys
 import datetime
+import sqlite3
 
 import streamlit as st
 import pandas as pd
 
-# ── 경로 설정 (dashboard.py가 있는 폴더 기준) ──────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 
+PERF_DB = os.path.join(BASE_DIR, "stock_performance.db")
+
+# ── ARK / Citrini 는 기존 db_manager 유지 ───────────────────────
 from db_manager import (
-    get_latest_results,
-    get_history_dates,
-    get_results_by_date,
-    run_backtest,
-    get_performance_summary,
     init_db,
     get_latest_ark_recommended,
-    get_ark_history_dates,
     get_ark_performance_summary,
     get_latest_citrini_risky,
     get_citrini_performance_summary,
-    get_citrini_by_risk_level,
     get_citrini_by_sector,
 )
 
-# ── 페이지 기본 설정 ───────────────────────────────────────────
+# ── 페이지 설정 ─────────────────────────────────────────────────
 st.set_page_config(
-    page_title="AI 주식 스크리닝",
+    page_title="AI 주식 스크리닝 v2",
     page_icon="📊",
     layout="wide",
 )
-
-init_db()   # 테이블 미존재 시 자동 생성
+init_db()
 
 
 # ═══════════════════════════════════════════════════════════════
-# 공통 헬퍼
+# DB 헬퍼
 # ═══════════════════════════════════════════════════════════════
+
+def _perf_conn():
+    return sqlite3.connect(PERF_DB)
+
+
+def _get_latest_date() -> str:
+    try:
+        conn = _perf_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT MAX(date) FROM daily_recommendations")
+        row = cur.fetchone()
+        conn.close()
+        return row[0] if row and row[0] else ""
+    except Exception:
+        return ""
+
+
+def _get_all_dates() -> list:
+    try:
+        conn = _perf_conn()
+        df = pd.read_sql(
+            "SELECT DISTINCT date FROM daily_recommendations ORDER BY date DESC",
+            conn,
+        )
+        conn.close()
+        return df["date"].tolist()
+    except Exception:
+        return []
+
+
+def _get_recommendations(date: str, market: str = "ALL",
+                         rec_type: str = "BUY") -> pd.DataFrame:
+    try:
+        conn = _perf_conn()
+        q = """
+            SELECT market, recommendation_type as type, rank,
+                   name, ticker, score, price, rsi,
+                   macd_hist, ma5, ma20, ma60, investor_tags
+            FROM daily_recommendations
+            WHERE date = ? AND recommendation_type = ?
+        """
+        params = [date, rec_type]
+        if market != "ALL":
+            q += " AND market = ?"
+            params.append(market)
+        q += " ORDER BY market, rank"
+        df = pd.read_sql(q, conn, params=params)
+        conn.close()
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def _get_win_rates() -> dict:
+    """기간별 승률 (이상값 ±30% 제외)"""
+    OUTLIER = {1: 20, 3: 25, 5: 30, 10: 40, 20: 60}
+    result = {}
+    try:
+        conn = _perf_conn()
+        for day in [1, 3, 5, 10, 20]:
+            lim = OUTLIER[day]
+            row = pd.read_sql(f"""
+                SELECT
+                  COUNT(*) as cnt,
+                  ROUND(SUM(CASE WHEN p.return_pct > 0 THEN 1 ELSE 0 END)*100.0/COUNT(*),1) as buy_wr,
+                  ROUND(AVG(p.return_pct),2) as avg_ret
+                FROM daily_recommendations r
+                JOIN price_tracking p ON r.id=p.recommendation_id AND p.day_after={day}
+                WHERE r.recommendation_type='BUY' AND ABS(p.return_pct)<{lim}
+            """, conn).iloc[0]
+            row_sell = pd.read_sql(f"""
+                SELECT
+                  COUNT(*) as cnt,
+                  ROUND(SUM(CASE WHEN p.return_pct < 0 THEN 1 ELSE 0 END)*100.0/COUNT(*),1) as sell_wr
+                FROM daily_recommendations r
+                JOIN price_tracking p ON r.id=p.recommendation_id AND p.day_after={day}
+                WHERE r.recommendation_type='SELL' AND ABS(p.return_pct)<{lim}
+            """, conn).iloc[0]
+            if row["cnt"] > 0:
+                result[day] = {
+                    "buy_cnt":  int(row["cnt"]),
+                    "buy_wr":   float(row["buy_wr"] or 0),
+                    "avg_ret":  float(row["avg_ret"] or 0),
+                    "sell_cnt": int(row_sell["cnt"]),
+                    "sell_wr":  float(row_sell["sell_wr"] or 0),
+                }
+        conn.close()
+    except Exception:
+        pass
+    return result
+
+
+def _get_score_win_rate() -> pd.DataFrame:
+    """점수 구간별 매수 승률 (5일, ±30% 이내)"""
+    try:
+        conn = _perf_conn()
+        df = pd.read_sql("""
+            SELECT
+              CASE WHEN r.score >= 60 THEN '60점+'
+                   WHEN r.score >= 40 THEN '40~60점'
+                   WHEN r.score >= 20 THEN '20~40점'
+                   ELSE '20점 미만' END as 점수구간,
+              COUNT(*) as 건수,
+              ROUND(AVG(p.return_pct),2) as 평균수익률,
+              ROUND(SUM(CASE WHEN p.return_pct>0 THEN 1 ELSE 0 END)*100.0/COUNT(*),1) as 승률
+            FROM daily_recommendations r
+            JOIN price_tracking p ON r.id=p.recommendation_id AND p.day_after=5
+            WHERE r.recommendation_type='BUY' AND ABS(p.return_pct)<30
+            GROUP BY 점수구간
+            ORDER BY 승률 DESC
+        """, conn)
+        conn.close()
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def _get_market_win_rate() -> pd.DataFrame:
+    """시장별 매수 승률 (5일, ±30% 이내)"""
+    try:
+        conn = _perf_conn()
+        df = pd.read_sql("""
+            SELECT r.market as 시장,
+              COUNT(*) as 건수,
+              ROUND(AVG(p.return_pct),2) as 평균수익률,
+              ROUND(SUM(CASE WHEN p.return_pct>0 THEN 1 ELSE 0 END)*100.0/COUNT(*),1) as 승률
+            FROM daily_recommendations r
+            JOIN price_tracking p ON r.id=p.recommendation_id AND p.day_after=5
+            WHERE r.recommendation_type='BUY' AND ABS(p.return_pct)<30
+            GROUP BY r.market ORDER BY 승률 DESC
+        """, conn)
+        conn.close()
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def _get_recent_results(limit: int = 30) -> pd.DataFrame:
+    """최근 HIT/MISS 결과 (5일 후, ±30% 이내)"""
+    try:
+        conn = _perf_conn()
+        df = pd.read_sql(f"""
+            SELECT r.date, r.market, r.ticker, r.name,
+                   r.recommendation_type as 신호, r.rank as 순위,
+                   r.score as 점수,
+                   r.price as 진입가, p.close_price as 청산가,
+                   p.return_pct as 수익률
+            FROM daily_recommendations r
+            JOIN price_tracking p ON r.id=p.recommendation_id AND p.day_after=5
+            WHERE r.date >= date('now', '-30 days')
+              AND ABS(p.return_pct) < 30
+            ORDER BY r.date DESC, r.recommendation_type, r.rank
+            LIMIT {limit}
+        """, conn)
+        conn.close()
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def _read_market_regime() -> dict:
+    """report_v4.txt 에서 시장 레짐 정보 파싱"""
+    regime = {"fear_greed": None, "regime": None, "vix": None, "kospi_chg": None}
+    try:
+        report_path = os.path.join(BASE_DIR, "report_v4.txt")
+        if not os.path.exists(report_path):
+            return regime
+        with open(report_path, encoding="utf-8") as f:
+            lines = f.readlines()
+        for line in lines[:15]:
+            if "Fear&Greed:" in line:
+                import re
+                m = re.search(r"Fear&Greed:\s*(\d+)", line)
+                if m:
+                    regime["fear_greed"] = int(m.group(1))
+            if "시장레짐:" in line:
+                m = re.search(r"시장레짐:\s*(\S+)", line)
+                if m:
+                    regime["regime"] = m.group(1)
+            if "VIX" in line:
+                m = re.search(r"VIX\s+([\d.]+)", line)
+                if m:
+                    regime["vix"] = float(m.group(1))
+            if "KOSPI" in line and ("+" in line or "-" in line):
+                m = re.search(r"KOSPI\s*([+-][\d.]+)%", line)
+                if m:
+                    regime["kospi_chg"] = float(m.group(1))
+    except Exception:
+        pass
+    return regime
+
+
+# ═══════════════════════════════════════════════════════════════
+# 스타일 헬퍼
+# ═══════════════════════════════════════════════════════════════
+
 def _style_score(val):
-    """점수 컬럼 색상: 양수=초록, 음수=빨강"""
     try:
         v = float(val)
         if v > 0:
@@ -64,11 +256,14 @@ def _style_score(val):
 
 
 def _style_return(val):
-    """수익률 컬럼 색상"""
     try:
         v = float(str(val).replace("%", ""))
+        if v >= 5:
+            return "background-color: #186a3b; color: white; font-weight: bold;"
         if v > 0:
             return "background-color: #e6ffe6; color: #186a3b; font-weight: bold;"
+        if v <= -5:
+            return "background-color: #922b21; color: white; font-weight: bold;"
         if v < 0:
             return "background-color: #ffe6e6; color: #922b21; font-weight: bold;"
     except Exception:
@@ -76,9 +271,24 @@ def _style_return(val):
     return ""
 
 
+def _style_winrate(val):
+    try:
+        v = float(str(val).replace("%", ""))
+        if v >= 60:
+            return "background-color: #e6ffe6; color: #186a3b; font-weight: bold;"
+        if v >= 50:
+            return "background-color: #fff9e6; color: #7d6608;"
+        if v < 40:
+            return "background-color: #ffe6e6; color: #922b21;"
+    except Exception:
+        pass
+    return ""
+
+
 def _fmt_price(v):
     try:
-        return f"{float(v):,.2f}"
+        f = float(v)
+        return f"{f:,.2f}" if f < 1000 else f"{f:,.0f}"
     except Exception:
         return str(v) if v else "-"
 
@@ -86,78 +296,84 @@ def _fmt_price(v):
 def _fmt_pct(v):
     try:
         f = float(v)
-        sign = "+" if f >= 0 else ""
-        return f"{sign}{f:.2f}%"
+        return f"{f:+.2f}%"
     except Exception:
-        return str(v) if v else "-"
+        return "-"
 
 
-def _results_to_df(rows: list) -> pd.DataFrame:
-    """DB row 리스트 → 표시용 DataFrame"""
-    if not rows:
-        return pd.DataFrame()
+SIGNAL_LABEL = {"BUY": "🔵 매수", "SELL": "🟠 매도"}
+MARKET_LABEL = {"KOSPI": "🇰🇷 코스피", "KOSDAQ": "🇰🇷 코스닥", "US": "🇺🇸 미국"}
 
-    cols_map = {
-        "rank":         "순위",
-        "group_name":   "그룹",
-        "name":         "종목명",
-        "ticker":       "티커",
-        "price":        "현재가",
-        "score":        "점수",
-        "dart_bonus":   "DART보너스",
-        "rsi":          "RSI",
-        "macd_hist":    "MACD히스트",
-        "bb_pct":       "BB위치(%)",
-        "vol_ratio":    "거래량비",
-        "mom5":         "5일모멘텀",
-        "ma5":          "MA5",
-        "ma20":         "MA20",
-        "ma60":         "MA60",
-        "atr":          "ATR14",
-        "stop_loss":    "손절가",
-        "target_price": "목표가",
+
+def _rec_to_display(df: pd.DataFrame) -> pd.DataFrame:
+    """추천 DataFrame → 표시용"""
+    if df.empty:
+        return df
+    rename = {
+        "market": "시장", "rank": "순위", "name": "종목명",
+        "ticker": "티커", "price": "현재가", "score": "점수",
+        "rsi": "RSI", "macd_hist": "MACD히스트",
+        "ma5": "MA5", "ma20": "MA20", "ma60": "MA60",
+        "investor_tags": "투자자태그",
     }
-
-    df = pd.DataFrame(rows)
-    rename = {k: v for k, v in cols_map.items() if k in df.columns}
-    df = df.rename(columns=rename)
-
-    # 숫자 포맷
-    for c in ["현재가", "손절가", "목표가", "MA5", "MA20", "MA60", "ATR14"]:
-        if c in df.columns:
-            df[c] = df[c].apply(_fmt_price)
-
-    for c in ["5일모멘텀"]:
-        if c in df.columns:
-            df[c] = df[c].apply(_fmt_pct)
-
-    # 표시 컬럼만 추출 (항상 유지할 핵심 컬럼)
-    show = [c for c in
-            ["순위", "그룹", "종목명", "티커", "현재가", "점수", "DART보너스",
-             "RSI", "BB위치(%)", "거래량비", "5일모멘텀",
-             "손절가", "목표가"]
-            if c in df.columns]
-    return df[show]
+    out = df.rename(columns=rename)
+    if "현재가" in out.columns:
+        out["현재가"] = out["현재가"].apply(_fmt_price)
+    if "시장" in out.columns:
+        out["시장"] = out["시장"].map(MARKET_LABEL).fillna(out["시장"])
+    for c in ["점수", "RSI", "MACD히스트", "MA5", "MA20"]:
+        if c in out.columns:
+            out[c] = out[c].apply(lambda x: f"{float(x):.0f}" if x is not None and x != "" else "-")
+    show = [c for c in ["시장", "순위", "종목명", "티커", "현재가", "점수",
+                         "RSI", "MACD히스트", "MA5", "MA20", "투자자태그"]
+            if c in out.columns]
+    return out[show]
 
 
 # ═══════════════════════════════════════════════════════════════
-# 헤더
+# 헤더 — 시장 레짐 카드
 # ═══════════════════════════════════════════════════════════════
-st.title("📊 AI 주식 스크리닝 대시보드")
-st.caption(f"DB: {os.path.join(BASE_DIR, 'stock_history.db')}  "
-           f"| 최종 갱신: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}")
+st.title("📊 AI 주식 스크리닝 대시보드 v2")
+
+latest_date = _get_latest_date()
+regime = _read_market_regime()
+
+col_h1, col_h2, col_h3, col_h4, col_h5 = st.columns(5)
+with col_h1:
+    st.metric("📅 최신 분석일", latest_date or "-")
+with col_h2:
+    fg = regime.get("fear_greed")
+    fg_label = "극공포" if fg and fg < 20 else ("공포" if fg and fg < 40 else
+               "중립" if fg and fg < 60 else ("탐욕" if fg and fg < 80 else "극탐욕"))
+    st.metric("😨 Fear & Greed", f"{fg}/100 [{fg_label}]" if fg else "-")
+with col_h3:
+    vix = regime.get("vix")
+    st.metric("📉 VIX", f"{vix}" if vix else "-",
+              delta="위험" if vix and vix > 20 else "안정",
+              delta_color="inverse" if vix and vix > 20 else "normal")
+with col_h4:
+    kospi = regime.get("kospi_chg")
+    st.metric("🇰🇷 KOSPI 5일", f"{kospi:+.1f}%" if kospi else "-",
+              delta=f"{kospi:+.1f}%" if kospi else None,
+              delta_color="normal")
+with col_h5:
+    r = regime.get("regime") or "-"
+    color = "🔴🔴" if "극도약세" in r else ("🔴" if "약세" in r else
+            "🟢🟢" if "극도강세" in r else ("🟢" if "강세" in r else "⚪"))
+    st.metric("📊 시장레짐", f"{color} {r}")
+
 st.divider()
 
 
 # ═══════════════════════════════════════════════════════════════
-# 탭 구성
+# 탭
 # ═══════════════════════════════════════════════════════════════
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📋 오늘의 추천",
-    "📈 백테스팅 성과",
-    "🗂️ 히스토리 조회",
-    "🎯 ARK 추천 종목",
-    "⚠️ Citrini 2028 부정적 종목",
+    "📊 성능 분석",
+    "🗂️ 히스토리",
+    "🎯 ARK 추천",
+    "⚠️ Citrini 2028",
 ])
 
 
@@ -165,330 +381,256 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 # TAB 1 : 오늘의 추천
 # ───────────────────────────────────────────────────────────────
 with tab1:
-    st.subheader("✅ 매수 추천 TOP 10")
-    buy_rows = get_latest_results(signal="buy", limit=10)
-    if buy_rows:
-        buy_df = _results_to_df(buy_rows)
-        # 점수 컬럼 스타일
-        styled_buy = buy_df.style.applymap(_style_score, subset=["점수"])
-        st.dataframe(styled_buy, use_container_width=True, hide_index=True)
+    if not latest_date:
+        st.info("분석 데이터가 없습니다. stock_advisor_v4.py를 먼저 실행하세요.")
     else:
-        st.info("매수 추천 데이터가 없습니다. stock_advisor.py를 먼저 실행하세요.")
+        st.caption(f"기준일: {latest_date}  |  DB: {PERF_DB}")
+
+        # 시장 필터
+        market_sel = st.radio(
+            "시장 선택", ["전체", "KOSPI", "KOSDAQ", "US"],
+            horizontal=True, key="tab1_market"
+        )
+        mkt = "ALL" if market_sel == "전체" else market_sel
+
+        c_buy, c_sell = st.columns(2)
+
+        with c_buy:
+            st.subheader("🔵 매수 추천")
+            buy_df = _get_recommendations(latest_date, mkt, "BUY")
+            if buy_df.empty:
+                st.info("매수 추천 데이터 없음")
+            else:
+                disp = _rec_to_display(buy_df)
+                styled = disp.style.applymap(_style_score, subset=["점수"])
+                st.dataframe(styled, use_container_width=True, hide_index=True)
+                st.caption(f"총 {len(buy_df)}개 종목 (최소 점수 40점 이상)")
+
+        with c_sell:
+            st.subheader("🟠 매도 추천")
+            sell_df = _get_recommendations(latest_date, mkt, "SELL")
+            if sell_df.empty:
+                st.info("매도 추천 데이터 없음")
+            else:
+                disp = _rec_to_display(sell_df)
+                styled = disp.style.applymap(_style_score, subset=["점수"])
+                st.dataframe(styled, use_container_width=True, hide_index=True)
+                st.caption(f"총 {len(sell_df)}개 종목")
+
+
+# ───────────────────────────────────────────────────────────────
+# TAB 2 : 성능 분석
+# ───────────────────────────────────────────────────────────────
+with tab2:
+    st.subheader("📈 기간별 매수 / 매도 승률")
+    st.caption("이상값(±30% 초과) 제외 기준")
+
+    win_data = _get_win_rates()
+
+    if not win_data:
+        st.info("성능 데이터가 부족합니다. 분석을 며칠 더 실행하세요.")
+    else:
+        # KPI 테이블
+        rows = []
+        for day in sorted(win_data.keys()):
+            d = win_data[day]
+            rows.append({
+                "기간": f"{day}일 후",
+                "매수 건수": d["buy_cnt"],
+                "매수 승률": f"{d['buy_wr']:.1f}%",
+                "평균 수익률": f"{d['avg_ret']:+.2f}%",
+                "매도 건수": d["sell_cnt"],
+                "매도 승률": f"{d['sell_wr']:.1f}%",
+            })
+        wr_df = pd.DataFrame(rows)
+
+        # 5일 기준 강조 메트릭
+        p5 = win_data.get(5, {})
+        p10 = win_data.get(10, {})
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            st.metric("5일 매수 승률", f"{p5.get('buy_wr', 0):.1f}%",
+                      help="이상값 제외 기준")
+        with c2:
+            st.metric("5일 매수 평균수익", f"{p5.get('avg_ret', 0):+.2f}%")
+        with c3:
+            st.metric("5일 매도 승률", f"{p5.get('sell_wr', 0):.1f}%")
+        with c4:
+            st.metric("10일 매수 승률", f"{p10.get('buy_wr', 0):.1f}%",
+                      help="데이터 충분 시 가장 신뢰도 높은 지표")
+
+        st.dataframe(
+            wr_df.style.applymap(_style_winrate, subset=["매수 승률", "매도 승률"])
+                       .applymap(_style_return, subset=["평균 수익률"]),
+            use_container_width=True, hide_index=True
+        )
 
     st.divider()
 
-    st.subheader("❌ 매도 추천 TOP 10")
-    sell_rows = get_latest_results(signal="sell", limit=10)
-    if sell_rows:
-        sell_df = _results_to_df(sell_rows)
-        styled_sell = sell_df.style.applymap(_style_score, subset=["점수"])
-        st.dataframe(styled_sell, use_container_width=True, hide_index=True)
+    # 점수 구간별 승률
+    col_s, col_m = st.columns(2)
+    with col_s:
+        st.subheader("🎯 점수 구간별 승률 (5일)")
+        score_df = _get_score_win_rate()
+        if score_df.empty:
+            st.info("데이터 부족")
+        else:
+            styled_s = score_df.style.applymap(_style_winrate, subset=["승률"]) \
+                                     .applymap(_style_return, subset=["평균수익률"])
+            st.dataframe(styled_s, use_container_width=True, hide_index=True)
+            st.caption("👉 40점 이상 구간에서 승률이 높음 → 매수 최소 점수 40점 적용 중")
+
+    with col_m:
+        st.subheader("🌏 시장별 승률 (5일)")
+        mkt_df = _get_market_win_rate()
+        if mkt_df.empty:
+            st.info("데이터 부족")
+        else:
+            styled_m = mkt_df.style.applymap(_style_winrate, subset=["승률"]) \
+                                    .applymap(_style_return, subset=["평균수익률"])
+            st.dataframe(styled_m, use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # 최근 HIT / MISS 결과
+    st.subheader("📋 최근 HIT / MISS (5일 후, ±30% 이내)")
+    recent_df = _get_recent_results(40)
+    if recent_df.empty:
+        st.info("검증 데이터가 없습니다. 추천 후 5거래일이 지나면 자동 집계됩니다.")
     else:
-        st.info("매도 추천 데이터가 없습니다.")
+        # HIT 여부 컬럼 추가
+        def hit_label(row):
+            if row["신호"] == "BUY":
+                return "✅ HIT" if row["수익률"] > 0 else "❌ MISS"
+            else:
+                return "✅ HIT" if row["수익률"] < 0 else "❌ MISS"
 
-    # 오늘의 날짜 표시
-    if buy_rows:
-        run_date = buy_rows[0].get("date", "")
-        st.caption(f"📅 데이터 기준일: {run_date[:4]}-{run_date[4:6]}-{run_date[6:]}")
+        recent_df["결과"] = recent_df.apply(hit_label, axis=1)
+        recent_df["수익률"] = recent_df["수익률"].apply(_fmt_pct)
+        recent_df["진입가"] = recent_df["진입가"].apply(_fmt_price)
+        recent_df["청산가"] = recent_df["청산가"].apply(_fmt_price)
+        recent_df["시장"] = recent_df["market"].map(MARKET_LABEL).fillna(recent_df["market"])
+        if "점수" in recent_df.columns:
+            recent_df["점수"] = recent_df["점수"].apply(lambda x: f"{float(x):.0f}" if x is not None and x != "" else "-")
 
+        show = ["date", "시장", "신호", "순위", "name", "ticker",
+                "점수", "진입가", "청산가", "수익률", "결과"]
+        show = [c for c in show if c in recent_df.columns]
+        rename_r = {"date": "날짜", "name": "종목명", "ticker": "티커"}
+        disp_r = recent_df[show].rename(columns=rename_r)
 
-# ───────────────────────────────────────────────────────────────
-# TAB 2 : 백테스팅 성과
-# ───────────────────────────────────────────────────────────────
-with tab2:
-    days_opt = st.radio(
-        "조회 기간",
-        options=[7, 14, 30, 60],
-        index=2,
-        horizontal=True,
-        format_func=lambda x: f"{x}일",
-    )
+        # 결과별 필터
+        result_filter = st.radio(
+            "결과 필터", ["전체", "HIT만", "MISS만"], horizontal=True, key="tab2_filter"
+        )
+        if result_filter == "HIT만":
+            disp_r = disp_r[disp_r["결과"].str.contains("HIT")]
+        elif result_filter == "MISS만":
+            disp_r = disp_r[disp_r["결과"].str.contains("MISS")]
 
-    perf = get_performance_summary(days_opt)
+        hit_cnt  = (recent_df["결과"].str.contains("HIT")).sum()
+        miss_cnt = (recent_df["결과"].str.contains("MISS")).sum()
+        total    = hit_cnt + miss_cnt
+        st.caption(f"HIT {hit_cnt}건 / MISS {miss_cnt}건 / 승률 {hit_cnt/total*100:.1f}%" if total else "")
 
-    if not perf:
-        st.warning("백테스팅 데이터가 없습니다. "
-                   "stock_advisor.py를 며칠 실행한 뒤 다시 확인하세요.")
-    else:
-        # 핵심 KPI 카드
-        col1, col2, col3, col4, col5 = st.columns(5)
-        with col1:
-            st.metric("📦 분석 종목수", f"{perf['종목수']}개")
-        with col2:
-            st.metric("🏆 승률", f"{perf['승률(%)']:.1f}%")
-        with col3:
-            avg = perf["평균수익률"]
-            st.metric("📊 평균수익률",
-                      f"{avg:+.2f}%",
-                      delta=f"{avg:+.2f}%",
-                      delta_color="normal")
-        with col4:
-            st.metric("📈 최대수익률", f"{perf['최대수익률']:+.2f}%")
-        with col5:
-            st.metric("📉 최대손실률", f"{perf['최대손실률']:+.2f}%")
-
-        col6, col7, col8 = st.columns(3)
-        with col6:
-            st.metric("✅ 수익 종목", f"{perf['양수종목']}개")
-        with col7:
-            st.metric("❌ 손실 종목", f"{perf['음수종목']}개")
-        with col8:
-            sl = perf.get("손절도달", 0)
-            tg = perf.get("목표도달", 0)
-            st.metric("🎯 손절/목표 도달", f"손절:{sl}  목표:{tg}")
-
-        st.divider()
-
-        # 상세 백테스팅 결과 테이블
-        st.subheader("📋 종목별 수익률 상세")
-        bt_rows = run_backtest(days_opt)
-        if bt_rows:
-            bt_df = pd.DataFrame(bt_rows)
-
-            # 컬럼 이름 한글화
-            rename_bt = {
-                "entry_date":    "진입일",
-                "rank":          "순위",
-                "name":          "종목명",
-                "ticker":        "티커",
-                "entry_price":   "진입가",
-                "current_price": "현재가",
-                "return_pct":    "수익률(%)",
-                "hit_stop":      "손절도달",
-                "hit_target":    "목표도달",
-            }
-            bt_df = bt_df.rename(columns=rename_bt)
-
-            # 수익률 포맷
-            bt_df["수익률(%)"] = bt_df["수익률(%)"].apply(
-                lambda x: f"{x:+.2f}%" if x is not None else "-"
-            )
-            bt_df["손절도달"] = bt_df["손절도달"].apply(
-                lambda x: "🔴" if x else ("⚪" if x is False else "-")
-            )
-            bt_df["목표도달"] = bt_df["목표도달"].apply(
-                lambda x: "🟢" if x else ("⚪" if x is False else "-")
-            )
-
-            show_cols = ["진입일", "순위", "종목명", "티커",
-                         "진입가", "현재가", "수익률(%)", "손절도달", "목표도달"]
-            bt_df = bt_df[[c for c in show_cols if c in bt_df.columns]]
-
-            styled_bt = bt_df.style.applymap(_style_return, subset=["수익률(%)"])
-            st.dataframe(styled_bt, use_container_width=True, hide_index=True)
+        styled_r = disp_r.style.applymap(_style_return, subset=["수익률"])
+        st.dataframe(styled_r, use_container_width=True, hide_index=True)
 
 
 # ───────────────────────────────────────────────────────────────
-# TAB 3 : 히스토리 조회
+# TAB 3 : 히스토리
 # ───────────────────────────────────────────────────────────────
 with tab3:
-    dates = get_history_dates()
-
-    if not dates:
-        st.info("저장된 히스토리가 없습니다. stock_advisor.py를 먼저 실행하세요.")
+    all_dates = _get_all_dates()
+    if not all_dates:
+        st.info("저장된 히스토리가 없습니다.")
     else:
-        # 날짜 선택기
-        date_labels = [f"{d[:4]}-{d[4:6]}-{d[6:]}" for d in dates]
-        selected_label = st.selectbox(
-            "📅 조회할 날짜를 선택하세요",
-            options=date_labels,
-        )
-        selected_date = dates[date_labels.index(selected_label)]
+        col_d, col_mkt, col_sig = st.columns(3)
+        with col_d:
+            sel_date = st.selectbox("📅 날짜", all_dates, key="tab3_date")
+        with col_mkt:
+            sel_mkt = st.selectbox("시장", ["전체", "KOSPI", "KOSDAQ", "US"], key="tab3_mkt")
+        with col_sig:
+            sel_sig = st.radio("신호", ["매수", "매도"], horizontal=True, key="tab3_sig")
 
-        sig_opt = st.radio("신호 유형", ["매수", "매도"], horizontal=True)
-        signal  = "buy" if sig_opt == "매수" else "sell"
+        mkt3 = "ALL" if sel_mkt == "전체" else sel_mkt
+        sig3 = "BUY" if sel_sig == "매수" else "SELL"
 
-        hist_rows = get_results_by_date(selected_date, signal)
-        if hist_rows:
-            hist_df = _results_to_df(hist_rows)
-            styled_hist = hist_df.style.applymap(_style_score, subset=["점수"])
-            st.dataframe(styled_hist, use_container_width=True, hide_index=True)
-            st.caption(f"총 {len(hist_rows)}개 종목 · {selected_label} · {sig_opt} 추천")
+        hist_df = _get_recommendations(sel_date, mkt3, sig3)
+        if hist_df.empty:
+            st.info(f"{sel_date} {sel_mkt} {sel_sig} 데이터가 없습니다.")
         else:
-            st.info(f"{selected_label} {sig_opt} 데이터가 없습니다.")
+            disp3 = _rec_to_display(hist_df)
+            styled3 = disp3.style.applymap(_style_score, subset=["점수"])
+            st.dataframe(styled3, use_container_width=True, hide_index=True)
+            st.caption(f"총 {len(hist_df)}개 종목 · {sel_date} · {sel_mkt} · {sel_sig}")
 
-        # 날짜별 수집 현황
-        with st.expander("📅 전체 저장 날짜 목록"):
-            for d in dates:
-                st.text(f"  {d[:4]}-{d[4:6]}-{d[6:]}")
+        with st.expander("📅 전체 보유 날짜 목록"):
+            for d in all_dates:
+                st.text(f"  {d}")
 
 
 # ───────────────────────────────────────────────────────────────
 # TAB 4 : ARK 추천 종목
 # ───────────────────────────────────────────────────────────────
 with tab4:
-    st.header("🎯 ARK Invest Big Ideas 2026 — 추천 종목")
-    st.caption("""
-    ARK Invest 의 'Big Ideas 2026' 보고서에서 선정한 유망 기업들을 추적합니다.
-    13 대 메가테마 (AI 인프라, 로보틱스, 바이오텍, 에너지 등) 에 따라 분류되며,
-    기존 스크리닝 추천 종목과 별도로 관리됩니다.
-    """)
+    st.header("🎯 ARK Invest Big Ideas 2026")
+    st.caption("ARK Big Ideas 2026 보고서 기반 13대 메가테마 유망 종목")
     st.divider()
 
-    # ARK 성과 요약
     ark_perf = get_ark_performance_summary(days_back=30)
-
     if ark_perf:
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("📦 분석 종목수", f"{ark_perf.get('종목수', 0)}개")
-        with col2:
-            avg = ark_perf.get('평균 20 일수익률', 0)
-            st.metric("📊 평균 20 일수익률",
-                      f"{avg:+.2f}%",
-                      delta=f"{avg:+.2f}%",
-                      delta_color="normal")
-        with col3:
-            st.metric("📈 최고수익률", f"{ark_perf.get('최고수익률', 0):+.2f}%")
-        with col4:
-            st.metric("📉 최저수익률", f"{ark_perf.get('최저수익률', 0):+.2f}%")
-    else:
-        st.info("ARK 추천 종목 데이터가 없습니다. ark_recommended_stocks.py 를 먼저 실행하세요.")
-
+        c1, c2, c3, c4 = st.columns(4)
+        avg = ark_perf.get("평균 20 일수익률", 0)
+        with c1:
+            st.metric("종목수", f"{ark_perf.get('종목수', 0)}개")
+        with c2:
+            st.metric("평균 20일 수익률", f"{avg:+.2f}%",
+                      delta=f"{avg:+.2f}%", delta_color="normal")
+        with c3:
+            st.metric("최고 수익률", f"{ark_perf.get('최고수익률', 0):+.2f}%")
+        with c4:
+            st.metric("최저 수익률", f"{ark_perf.get('최저수익률', 0):+.2f}%")
     st.divider()
 
-    # 최신 ARK 추천 종목 목록
-    st.subheader("📋 최신 ARK 추천 종목 목록")
-
-    ark_rows = get_latest_ark_recommended(limit=50)
-
+    ark_rows = get_latest_ark_recommended(limit=60)
     if ark_rows:
-        # 데이터프레임 변환
         ark_df = pd.DataFrame(ark_rows)
-
-        # 컬럼 이름 한글화
         rename_ark = {
-            "ticker":       "티커",
-            "name":         "종목명",
-            "market":       "시장",
-            "theme_key":    "테마",
-            "price":        "현재가",
-            "change_1d":    "1 일등락",
-            "change_5d":    "5 일등락",
-            "change_20d":   "20 일등락",
-            "rsi":          "RSI",
-            "priority":     "우선순위",
-            "reason":       "추천사유",
+            "ticker": "티커", "name": "종목명", "market": "시장",
+            "theme_key": "테마", "price": "현재가",
+            "change_1d": "1일등락", "change_5d": "5일등락",
+            "change_20d": "20일등락", "rsi": "RSI",
+            "priority": "우선순위", "reason": "추천사유",
         }
         ark_df = ark_df.rename(columns=rename_ark)
-
-        # 포맷팅
+        for c in ["1일등락", "5일등락", "20일등락"]:
+            if c in ark_df.columns:
+                ark_df[c] = ark_df[c].apply(lambda x: f"{x:+.2f}%" if x else "-")
         ark_df["현재가"] = ark_df["현재가"].apply(lambda x: f"{x:,.0f}" if x else "-")
-        ark_df["1 일등락"] = ark_df["1 일등락"].apply(lambda x: f"{x:+.2f}%" if x else "-")
-        ark_df["5 일등락"] = ark_df["5 일등락"].apply(lambda x: f"{x:+.2f}%" if x else "-")
-        ark_df["20 일등락"] = ark_df["20 일등락"].apply(lambda x: f"{x:+.2f}%" if x else "-")
         ark_df["RSI"] = ark_df["RSI"].apply(lambda x: f"{x:.1f}" if x else "-")
+        pri_map = {"CORE": "🔴 CORE", "HIGH": "🟡 HIGH", "MEDIUM": "⚪ MEDIUM"}
+        ark_df["우선순위"] = ark_df["우선순위"].map(pri_map).fillna(ark_df["우선순위"])
 
-        # 우선순위 아이콘
-        def priority_icon(p):
-            if p == "CORE": return "🔴 CORE"
-            if p == "HIGH": return "🟡 HIGH"
-            if p == "MEDIUM": return "⚪ MEDIUM"
-            return p
+        show_cols = ["티커", "종목명", "시장", "우선순위", "테마",
+                     "현재가", "1일등락", "5일등락", "20일등락", "RSI", "추천사유"]
+        show_cols = [c for c in show_cols if c in ark_df.columns]
 
-        ark_df["우선순위"] = ark_df["우선순위"].apply(priority_icon)
-
-        # 20 일등락 색상
-        def style_return(val):
+        def _ark_ret(val):
             try:
                 v = float(str(val).replace("%", ""))
                 if v > 0:
-                    return "background-color: #e6ffe6; color: #186a3b; font-weight: bold;"
+                    return "background-color:#e6ffe6;color:#186a3b;font-weight:bold;"
                 if v < 0:
-                    return "background-color: #ffe6e6; color: #922b21; font-weight: bold;"
+                    return "background-color:#ffe6e6;color:#922b21;font-weight:bold;"
             except Exception:
                 pass
             return ""
 
-        # 표시 컬럼
-        show_cols = ["티커", "종목명", "시장", "우선순위", "테마",
-                     "현재가", "1 일등락", "5 일등락", "20 일등락", "RSI", "추천사유"]
-        show_cols = [c for c in show_cols if c in ark_df.columns]
-
-        styled_ark = ark_df.style.apply(style_return, subset=["20 일등락"])
+        styled_ark = ark_df[show_cols].style.applymap(_ark_ret, subset=["20일등락"])
         st.dataframe(styled_ark, use_container_width=True, hide_index=True)
-
-        # 데이터 기준일
-        if ark_rows:
-            run_date = ark_rows[0].get("date", "")
-            st.caption(f"📅 데이터 기준일: {run_date[:4]}-{run_date[4:6]}-{run_date[6:]}")
-
     else:
-        st.info("ARK 추천 종목 데이터가 없습니다. ark_recommended_stocks.py 를 먼저 실행하세요.")
-
-    st.divider()
-
-    # ARK 테마별 필터
-    st.subheader("🔍 테마별 필터")
-
-    theme_options = {
-        "1_대가속": "1. 대가속 (5 개 플랫폼 수렴)",
-        "2_AI 인프라": "2. AI 인프라",
-        "3_AI_Consumer_OS": "3. AI Consumer OS",
-        "4_AI_생산성": "4. AI 생산성",
-        "5_비트코인": "5. 비트코인",
-        "6_토큰화자산": "6. 토큰화 자산",
-        "7_DeFi": "7. DeFi",
-        "8_멀티오믹스": "8. 멀티오믹스",
-        "9_재사용로켓": "9. 재사용 로켓",
-        "10_로보틱스": "10. 로보틱스",
-        "11_분산에너지": "11. 분산 에너지",
-        "12_자율주행": "12. 자율주행",
-        "13_자율물류": "13. 자율 물류",
-    }
-
-    selected_theme = st.selectbox(
-        "테마를 선택하세요",
-        options=list(theme_options.keys()),
-        format_func=lambda x: theme_options[x],
-    )
-
-    if st.button("테마별 종목 조회"):
-        from db_manager import get_ark_by_theme
-        theme_rows = get_ark_by_theme(selected_theme)
-
-        if theme_rows:
-            theme_df = pd.DataFrame(theme_rows)
-            theme_df = theme_df.rename(columns=rename_ark)
-
-            # 포맷팅
-            theme_df["현재가"] = theme_df["현재가"].apply(lambda x: f"{x:,.0f}" if x else "-")
-            theme_df["20 일등락"] = theme_df["20 일등락"].apply(lambda x: f"{x:+.2f}%" if x else "-")
-            theme_df["RSI"] = theme_df["RSI"].apply(lambda x: f"{x:.1f}" if x else "-")
-            theme_df["우선순위"] = theme_df["우선순위"].apply(priority_icon)
-
-            show_cols = ["티커", "종목명", "시장", "우선순위",
-                         "현재가", "20 일등락", "RSI", "추천사유"]
-            show_cols = [c for c in show_cols if c in theme_df.columns]
-
-            styled_theme = theme_df.style.apply(style_return, subset=["20 일등락"])
-            st.dataframe(styled_theme, use_container_width=True, hide_index=True)
-            st.caption(f"총 {len(theme_rows)}개 종목 · {theme_options[selected_theme]}")
-        else:
-            st.info(f"{theme_options[selected_theme]} 테마의 데이터가 없습니다.")
-
-    st.divider()
-
-    # ARK 정보
-    with st.expander("📚 ARK Big Ideas 2026 정보"):
-        st.markdown("""
-        ### ARK Invest Big Ideas 2026
-        ARK Invest 는 2026 년 1 월 연례 보고서 'Big Ideas 2026'을 통해
-        13 대 메가테마를 발표했습니다.
-
-        **주요 테마:**
-        - 1. 대가속 (The Great Acceleration) — 5 개 플랫폼 수렴
-        - 2. AI 인프라 — 데이터센터·반도체·전력
-        - 3. AI Consumer OS — AI 가 검색·쇼핑·의사결정 대체
-        - 4. AI 생산성 — 기업 소프트웨어 AI 전환
-        - 8. 멀티오믹스 — AI × Biology 신약개발
-        - 10. 로보틱스 — 범용 물리 AI
-        - 11. 분산 에너지 — 전력이 AI 의 병목
-
-        **출처:** [ark-invest.com/big-ideas-2026](https://ark-invest.com/big-ideas-2026)
-
-        **참고:** 이 데이터는 투자 참고용이며, 최종 투자 결정은 본인의 책임입니다.
-        """)
+        st.info("ARK 데이터 없음. ark_recommended_stocks.py 먼저 실행하세요.")
 
 
 # ───────────────────────────────────────────────────────────────
@@ -496,219 +638,69 @@ with tab4:
 # ───────────────────────────────────────────────────────────────
 with tab5:
     st.header("⚠️ Citrini 2028 글로벌 지능위기 — 부정적 종목")
-    st.caption("""
-    Citrini Research 의 '2028 Global Intelligence Crisis' 보고서는 
-    AI 에 의한 대량실업과 소비 붕괴 시나리오를 경고합니다.
-    이 탭에서는 위기 피해가 예상되는 기업들을 추적합니다.
-    """)
+    st.caption("AI 대량실업·소비붕괴 시나리오에서 피해 예상 종목 추적")
     st.divider()
 
-    # 시나리오 개요
-    st.subheader("📜 Citrini 2028 위기 시나리오")
-    st.markdown("""
-    **주요 내용:**
-    - AI 가 화이트칼라 대량 실업 유발
-    - 소비 붕괴 → 디플레이션 악순환
-    - S&P 500: 8000 → 3500 붕괴 (2028 년 6 월)
-    - 실업률 최고 10.2% 도달
-    """)
-
-    st.divider()
-
-    # Citrini 성과 요약
     citrini_perf = get_citrini_performance_summary(days_back=30)
-
     if citrini_perf:
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("📦 분석 종목수", f"{citrini_perf.get('종목수', 0)}개")
-        with col2:
-            avg = citrini_perf.get('평균 20 일수익률', 0)
-            st.metric("📊 평균 20 일수익률",
-                      f"{avg:+.2f}%",
-                      delta=f"{avg:+.2f}%",
-                      delta_color="normal" if avg < 0 else "inverse")
-        with col3:
-            st.metric("🔴 HIGH 위험평균", 
-                      f"{citrini_perf.get('HIGH 위험평균', 0):+.2f}%" if citrini_perf.get('HIGH 위험평균') else "N/A")
-        with col4:
-            st.metric("📉 최저수익률", f"{citrini_perf.get('최저수익률', 0):+.2f}%")
-    else:
-        st.info("Citrini 부정적 종목 데이터가 없습니다. citrini_risky_stocks.py 를 먼저 실행하세요.")
-
+        c1, c2, c3, c4 = st.columns(4)
+        avg_c = citrini_perf.get("평균 20 일수익률", 0)
+        with c1:
+            st.metric("종목수", f"{citrini_perf.get('종목수', 0)}개")
+        with c2:
+            st.metric("평균 20일 수익률", f"{avg_c:+.2f}%",
+                      delta=f"{avg_c:+.2f}%",
+                      delta_color="normal" if avg_c < 0 else "inverse")
+        with c3:
+            h = citrini_perf.get("HIGH 위험평균")
+            st.metric("HIGH 위험 평균", f"{h:+.2f}%" if h else "N/A")
+        with c4:
+            st.metric("최저 수익률", f"{citrini_perf.get('최저수익률', 0):+.2f}%")
     st.divider()
 
-    # 최신 부정적 종목 목록
-    st.subheader("📋 부정적 종목 목록 (위험등급별)")
-
-    citrini_rows = get_latest_citrini_risky(limit=50)
-
+    citrini_rows = get_latest_citrini_risky(limit=60)
     if citrini_rows:
-        # 위험등급 필터
         risk_filter = st.radio(
-            "위험등급 필터",
-            options=["ALL", "HIGH", "MEDIUM", "LOW"],
-            horizontal=True
+            "위험등급", ["ALL", "HIGH", "MEDIUM", "LOW"], horizontal=True
         )
+        rows_f = [r for r in citrini_rows if risk_filter == "ALL"
+                  or r.get("risk_level") == risk_filter]
 
-        if risk_filter != "ALL":
-            filtered_rows = [r for r in citrini_rows if r.get("risk_level") == risk_filter]
-        else:
-            filtered_rows = citrini_rows
-
-        # 데이터프레임 변환
-        citrini_df = pd.DataFrame(filtered_rows)
-
-        if not citrini_df.empty:
-            # 컬럼 이름 한글화
-            rename_citrini = {
-                "ticker":       "티커",
-                "name":         "종목명",
-                "market":       "시장",
-                "sector":       "섹터",
-                "risk_level":   "위험등급",
-                "price":        "현재가",
-                "change_1d":    "1 일등락",
-                "change_20d":   "20 일등락",
-                "rsi":          "RSI",
-                "reason":       "위험사유",
+        cit_df = pd.DataFrame(rows_f)
+        if not cit_df.empty:
+            rename_cit = {
+                "ticker": "티커", "name": "종목명", "market": "시장",
+                "sector": "섹터", "risk_level": "위험등급",
+                "price": "현재가", "change_1d": "1일등락",
+                "change_20d": "20일등락", "rsi": "RSI", "reason": "위험사유",
             }
-            citrini_df = citrini_df.rename(columns=rename_citrini)
+            cit_df = cit_df.rename(columns=rename_cit)
+            cit_df["현재가"] = cit_df["현재가"].apply(lambda x: f"{x:,.0f}" if x else "-")
+            cit_df["1일등락"] = cit_df["1일등락"].apply(lambda x: f"{x:+.2f}%" if x else "-")
+            cit_df["20일등락"] = cit_df["20일등락"].apply(lambda x: f"{x:+.2f}%" if x else "-")
+            cit_df["RSI"] = cit_df["RSI"].apply(lambda x: f"{x:.1f}" if x else "-")
+            risk_map = {"HIGH": "🔴 HIGH", "MEDIUM": "🟡 MEDIUM", "LOW": "⚪ LOW"}
+            cit_df["위험등급"] = cit_df["위험등급"].map(risk_map).fillna(cit_df["위험등급"])
 
-            # 포맷팅
-            citrini_df["현재가"] = citrini_df["현재가"].apply(lambda x: f"{x:,.0f}" if x else "-")
-            citrini_df["1 일등락"] = citrini_df["1 일등락"].apply(lambda x: f"{x:+.2f}%" if x else "-")
-            citrini_df["20 일등락"] = citrini_df["20 일등락"].apply(lambda x: f"{x:+.2f}%" if x else "-")
-            citrini_df["RSI"] = citrini_df["RSI"].apply(lambda x: f"{x:.1f}" if x else "-")
-
-            # 위험등급 아이콘
-            def risk_icon(p):
-                if p == "HIGH": return "🔴 HIGH"
-                if p == "MEDIUM": return "🟡 MEDIUM"
-                if p == "LOW": return "⚪ LOW"
-                return p
-
-            citrini_df["위험등급"] = citrini_df["위험등급"].apply(risk_icon)
-
-            # 20 일등락 색상 (음수일 때 더 강조)
-            def style_risk_return(val):
+            def _cit_ret(val):
                 try:
                     v = float(str(val).replace("%", ""))
                     if v < -15:
-                        return "background-color: #ff4444; color: white; font-weight: bold;"
+                        return "background-color:#ff4444;color:white;font-weight:bold;"
                     if v < -5:
-                        return "background-color: #ffe6e6; color: #922b21; font-weight: bold;"
+                        return "background-color:#ffe6e6;color:#922b21;font-weight:bold;"
                     if v < 0:
-                        return "background-color: #fff3e6; color: #ba4a00;"
-                    return "background-color: #e6ffe6; color: #186a3b;"
+                        return "background-color:#fff3e6;color:#ba4a00;"
+                    return "background-color:#e6ffe6;color:#186a3b;"
                 except Exception:
                     return ""
 
-            # 표시 컬럼
-            show_cols = ["티커", "종목명", "시장", "위험등급", "섹터",
-                         "현재가", "20 일등락", "RSI", "위험사유"]
-            show_cols = [c for c in show_cols if c in citrini_df.columns]
-
-            styled_citrini = citrini_df.style.apply(style_risk_return, subset=["20 일등락"])
-            st.dataframe(styled_citrini, use_container_width=True, hide_index=True)
-
-            # 데이터 기준일
-            if citrini_rows:
-                run_date = citrini_rows[0].get("date", "")
-                st.caption(f"📅 데이터 기준일: {run_date[:4]}-{run_date[4:6]}-{run_date[6:]}")
+            show_cit = ["티커", "종목명", "시장", "위험등급", "섹터",
+                        "현재가", "20일등락", "RSI", "위험사유"]
+            show_cit = [c for c in show_cit if c in cit_df.columns]
+            styled_cit = cit_df[show_cit].style.applymap(_cit_ret, subset=["20일등락"])
+            st.dataframe(styled_cit, use_container_width=True, hide_index=True)
         else:
-            st.info(f"{risk_filter} 위험등급의 데이터가 없습니다.")
-
+            st.info(f"{risk_filter} 위험등급 데이터 없음")
     else:
-        st.info("Citrini 부정적 종목 데이터가 없습니다.")
-
-    st.divider()
-
-    # 섹터별 필터
-    st.subheader("🔍 섹터별 필터")
-
-    sector_options = {
-        "IT 아웃소싱": "인도 IT 서비스, BPO 계약",
-        "전통 SaaS": "CRM, ERP, HR 소프트웨어",
-        "배달·결제": "소비 지출 의존",
-        "부동산": "고가 주택시장",
-        "플랫폼": "검색, 광고, 모빌리티",
-        "IT 서비스": "레거시 IT 서비스",
-        "하드웨어": "PC, 서버",
-        "엔터테인먼트": "음악, 연예기획",
-    }
-
-    selected_sector = st.selectbox(
-        "섹터를 선택하세요",
-        options=list(sector_options.keys()),
-    )
-
-    if st.button("섹터별 종목 조회"):
-        sector_rows = get_citrini_by_sector(selected_sector)
-
-        if sector_rows:
-            sector_df = pd.DataFrame(sector_rows)
-            sector_df = sector_df.rename(columns=rename_citrini)
-
-            # 포맷팅
-            sector_df["현재가"] = sector_df["현재가"].apply(lambda x: f"{x:,.0f}" if x else "-")
-            sector_df["20 일등락"] = sector_df["20 일등락"].apply(lambda x: f"{x:+.2f}%" if x else "-")
-            sector_df["RSI"] = sector_df["RSI"].apply(lambda x: f"{x:.1f}" if x else "-")
-            sector_df["위험등급"] = sector_df["위험등급"].apply(risk_icon)
-
-            show_cols = ["티커", "종목명", "시장", "위험등급",
-                         "현재가", "20 일등락", "RSI", "위험사유"]
-            show_cols = [c for c in show_cols if c in sector_df.columns]
-
-            styled_sector = sector_df.style.apply(style_risk_return, subset=["20 일등락"])
-            st.dataframe(styled_sector, use_container_width=True, hide_index=True)
-            st.caption(f"총 {len(sector_rows)}개 종목 · {selected_sector} ({sector_options[selected_sector]})")
-        else:
-            st.info(f"{selected_sector} 섹터의 데이터가 없습니다.")
-
-    st.divider()
-
-    # 위기 선행 지표
-    st.subheader("📊 위기 선행 지표")
-    st.markdown("""
-    **Citrini 위기 지표 모니터링:**
-    
-    | 지표 | 설명 |
-    |------|------|
-    | IGV | 소프트웨어 ETF (SaaS 멀티플 압축 선행지표) |
-    | XHB | 주택건설 ETF (주택시장 버블 지표) |
-    | ^VIX | 공포지수 (50+ = 위기 급박) |
-    | ^TNX | 미 10 년채 수익률 (급락 = 디플레이션 신호) |
-    | DXY | 달러인덱스 (급등 = 위험회피 자금 이동) |
-    | XRT | 소매 ETF (소비 붕괴 조기 지표) |
-    
-    **주의:** 이 데이터는 Citrini Research 의 시나리오 기반 경고이며, 
-    실제 위기 발생 여부는 다릅니다. 투자 참고용으로만 활용하세요.
-    """)
-
-    st.divider()
-
-    # Citrini 정보
-    with st.expander("📚 Citrini 2028 보고서 정보"):
-        st.markdown("""
-        ### Citrini Research "2028 Global Intelligence Crisis"
-        
-        Citrini Research 는 2026 년 2 월 '2028 글로벌 지능위기' 시나리오 보고서를 발표했습니다.
-        
-        **주요 경고:**
-        - AI 에 의한 화이트칼라 대량 실업
-        - 소비 붕괴와 디플레이션 악순환
-        - S&P 500 의 8000 → 3500 붕괴 (2028 년 6 월)
-        - 실업률 10.2% 도달
-        
-        **피해 예상 업종:**
-        - 인도 IT 아웃소싱 (Wipro, Infosys, Accenture 등)
-        - 전통 SaaS (Salesforce, Oracle, SAP 등)
-        - 배달·결제 서비스 (DoorDash, American Express 등)
-        - 고가 부동산 (Zillow, Redfin 등)
-        - 화이트칼라 고용 의존 업종
-        
-        **출처:** Citrini Research "2028 Global Intelligence Crisis" (2026-02-22)
-        
-        **참고:** 이 데이터는 투자 참고용이며, 최종 투자 결정은 본인의 책임입니다.
-        """)
+        st.info("Citrini 데이터 없음. citrini_risky_stocks.py 먼저 실행하세요.")

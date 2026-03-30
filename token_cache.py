@@ -123,44 +123,52 @@ def save_analysis_cache(data: dict, result: str) -> bool:
 
 def clear_old_cache(max_age_days: int = 7) -> int:
     """
-    오래된 캐시 파일 삭제
-    
+    오래된 Claude 분석 캐시 파일 삭제.
+
+    Claude 캐시 파일은 32자리 MD5 hex 이름을 사용한다.
+    screening_*, fundamentals.json, broker_picks_*, claude_structured_* 등
+    다른 캐시 파일은 건드리지 않는다.
+
     Args:
         max_age_days: 최대 보관 기간 (일)
-    
+
     Returns:
         삭제된 파일 수
     """
+    import re
     ensure_cache_dir()
-    
+
+    # Claude 분석 캐시 파일만 대상: 32자리 16진수 이름
+    _MD5_PATTERN = re.compile(r'^[0-9a-f]{32}\.json$')
+
     deleted_count = 0
     now = datetime.datetime.now()
-    
+
     for filename in os.listdir(CACHE_DIR):
-        if not filename.endswith('.json'):
-            continue
-        
+        if not _MD5_PATTERN.match(filename):
+            continue  # screening/fundamentals 등 다른 캐시는 무시
+
         cache_file = os.path.join(CACHE_DIR, filename)
-        
+
         try:
             with open(cache_file, 'r', encoding='utf-8') as f:
                 cache_data = json.load(f)
-            
+
             cached_at = datetime.datetime.fromisoformat(cache_data['cached_at'])
             age_days = (now - cached_at).total_seconds() / 86400
-            
+
             if age_days > max_age_days:
                 os.remove(cache_file)
                 deleted_count += 1
-        
+
         except Exception:
-            # 오류 발생 시 삭제
+            # 파싱 오류 시에만 삭제 (형식 이상 파일)
             try:
                 os.remove(cache_file)
                 deleted_count += 1
-            except:
+            except Exception:
                 pass
-    
+
     return deleted_count
 
 

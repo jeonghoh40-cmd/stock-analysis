@@ -59,6 +59,11 @@ def init_database():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # 같은 날 같은 티커+타입 중복 저장 방지 (rank 무관)
+    cursor.execute('''
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_recommendation
+        ON daily_recommendations(date, ticker, recommendation_type)
+    ''')
     
     # 2. 일별 가격 변동 테이블 (추천 후 성과 추적)
     cursor.execute('''
@@ -174,32 +179,39 @@ def save_daily_recommendations(date: str, recommendations: Dict[str, List[dict]]
     market_map = {
         'kospi': 'KOSPI',
         'kosdaq': 'KOSDAQ',
-        'us': 'US'
+        'us': 'US',
+        'ipo': 'IPO',
     }
     
     for key, recs in recommendations.items():
         parts = key.split('_')
         if len(parts) != 2:
             continue
-        
+
         market_key, rec_type = parts
         market = market_map.get(market_key, market_key.upper())
         rec_type = rec_type.upper()  # BUY or SELL
-        
+
         for rank, rec in enumerate(recs, 1):
             # 투자자 태그 문자열 변환
             investor_tags = rec.get('investor_tags', '해당없음')
             if isinstance(investor_tags, list):
                 investor_tags = ','.join(investor_tags)
-            
+
+            # entry price 유효성 검증: 0 이하이거나 비정상적으로 낮은 값 방어
+            entry_price = rec.get('price')
+            if not entry_price or entry_price <= 0:
+                print(f"  ⚠️ {rec['ticker']} entry price 오류({entry_price}), 저장 건너뜀")
+                continue
+
             cursor.execute('''
-                INSERT INTO daily_recommendations 
-                (date, market, ticker, name, recommendation_type, rank, score, 
+                INSERT OR IGNORE INTO daily_recommendations
+                (date, market, ticker, name, recommendation_type, rank, score,
                  price, rsi, macd_hist, ma5, ma20, ma60, investor_tags)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 date, market, rec['ticker'], rec['name'], rec_type, rank,
-                rec['score'], rec['price'], rec.get('rsi'), rec.get('macd_hist'),
+                rec['score'], entry_price, rec.get('rsi'), rec.get('macd_hist'),
                 rec.get('ma5'), rec.get('ma20'), rec.get('ma60'), investor_tags
             ))
     
@@ -216,58 +228,363 @@ def update_price_tracking(target_date: str = None):
     """
     저장된 추천 종목들의 가격 추적 업데이트
     추천일로부터 1 일, 3 일, 5 일, 10 일, 20 일 후 수익률 계산
+
+    수정: (recommendation_id, day_after) 조합별로 개별 체크하여
+    일부 day_after만 누락된 경우에도 채울 수 있도록 개선
     """
     if target_date is None:
         target_date = datetime.datetime.now().strftime('%Y-%m-%d')
-    
+
     conn = get_db_connection()
     cursor = conn.cursor()
-    
-    # 아직 추적되지 않은 추천 종목 조회
+
+    # 모든 추천 종목 조회 (미래 추천일은 제외)
     cursor.execute('''
         SELECT DISTINCT id, ticker, date, price
         FROM daily_recommendations
-        WHERE id NOT IN (SELECT DISTINCT recommendation_id FROM price_tracking)
-    ''')
-    
+        WHERE date <= ?
+        ORDER BY date
+    ''', (target_date,))
+
     recommendations = cursor.fetchall()
-    
+
     import yfinance as yf
-    
+
+    DAY_AFTERS = [1, 3, 5, 10, 20]
+
     for rec_id, ticker, rec_date, initial_price in recommendations:
+        # 이 추천에 대해 아직 없는 day_after 목록만 추출
+        cursor.execute('''
+            SELECT day_after FROM price_tracking
+            WHERE recommendation_id = ?
+        ''', (rec_id,))
+        existing_days = {row[0] for row in cursor.fetchall()}
+
+        # 각 day_after 별로 대상일이 오늘 이전인지 확인 후 누락분만 선별
+        missing_days = []
+        for day_after in DAY_AFTERS:
+            if day_after in existing_days:
+                continue
+            # 거래일 기준이 아닌 단순 캘린더 기준으로 필터 (실제 거래일은 df 길이로 판단)
+            # 추천일 + day_after 캘린더 일수가 오늘 이전이면 처리 대상
+            try:
+                rec_dt = datetime.datetime.strptime(rec_date, '%Y-%m-%d')
+                expected_dt = rec_dt + datetime.timedelta(days=day_after)
+                if expected_dt.strftime('%Y-%m-%d') < target_date:
+                    missing_days.append(day_after)
+            except ValueError:
+                missing_days.append(day_after)
+
+        if not missing_days:
+            continue
+
         try:
             # 추천일 이후 가격 데이터 조회
-            df = yf.download(ticker, start=rec_date, progress=False)
-            
+            df = yf.Ticker(ticker).history(start=rec_date, timeout=10)
+
             if df.empty or len(df) < 2:
                 continue
-            
-            # yfinance 1.x: 단일 ticker도 Close가 DataFrame으로 반환될 수 있음
-            close_col = df['Close']
-            if isinstance(close_col, pd.DataFrame):
-                close_col = close_col.iloc[:, 0]
 
-            # 일별 수익률 계산 (최대 20 일)
-            for day_after in [1, 3, 5, 10, 20]:
+            close_col = df['Close']
+
+            # 누락된 day_after 만 INSERT
+            for day_after in missing_days:
                 if len(df) <= day_after:
                     continue
 
                 close_price = float(close_col.iloc[day_after])
-                return_pct = ((close_price - initial_price) / initial_price) * 100
-                
+                if initial_price and initial_price > 0:
+                    return_pct = ((close_price - initial_price) / initial_price) * 100
+                else:
+                    return_pct = 0.0
+
                 cursor.execute('''
-                    INSERT INTO price_tracking 
+                    INSERT INTO price_tracking
                     (recommendation_id, ticker, date, day_after, close_price, return_pct)
                     VALUES (?, ?, ?, ?, ?, ?)
                 ''', (rec_id, ticker, rec_date, day_after, close_price, return_pct))
-        
+
         except Exception as e:
             print(f"  ⚠️ {ticker} 가격 추적 실패: {e}")
             continue
-    
+
     conn.commit()
     conn.close()
     print(f"  ✓ 가격 추적 업데이트 완료")
+
+
+# ═══════════════════════════════════════════════════════════════
+# 추천 검증 (과거 추천 실적 집계)
+# ═══════════════════════════════════════════════════════════════
+
+def verify_past_recommendations() -> dict:
+    """
+    추천일 기준 1/3/5/10/20일 후 성과를 집계해 반환.
+    충분한 데이터가 있는 기간(day_after)만 포함.
+
+    반환 구조:
+    {
+        "by_period": {
+            5: {
+                "buy_count": int, "buy_win_rate": float, "buy_avg_return": float,
+                "sell_count": int, "sell_win_rate": float, "sell_avg_return": float,
+                "by_market": {"KOSPI": {...}, "KOSDAQ": {...}, "US": {...}}
+            },
+            ...  # 데이터 있는 day_after만
+        },
+        "recent_results": [  # 최근 20거래일 내 추천의 5일 성과
+            {
+                "date": str, "market": str, "ticker": str, "name": str,
+                "type": "BUY"/"SELL", "rank": int,
+                "entry_price": float, "exit_price": float,
+                "return_pct": float, "result": "HIT"/"MISS"
+            }, ...
+        ],
+        "summary": {
+            "best_day_after": int,
+            "overall_buy_win_rate": float,
+            "overall_sell_win_rate": float,
+            "total_verified": int,
+        }
+    }
+    """
+    try:
+        conn = get_db_connection()
+
+        # ── 기간별 집계 ────────────────────────────────────────────
+        # 이상값 필터 기준: 기간별 최대 허용 수익률
+        # 과거 장중 스냅샷 오류로 기록된 비정상 수익률 제거
+        _OUTLIER = {1: 20, 3: 25, 5: 30, 10: 40, 20: 60}
+
+        by_period = {}
+        for day_after in [1, 3, 5, 10, 20]:
+            limit = _OUTLIER[day_after]
+            # 전체 매수 집계 (이상값 제외)
+            query_buy = '''
+                SELECT
+                    COUNT(*) as cnt,
+                    SUM(CASE WHEN p.return_pct > 0 THEN 1 ELSE 0 END) as wins,
+                    AVG(p.return_pct) as avg_ret
+                FROM daily_recommendations r
+                INNER JOIN price_tracking p
+                    ON r.id = p.recommendation_id AND p.day_after = ?
+                WHERE r.recommendation_type = 'BUY'
+                  AND ABS(p.return_pct) < ?
+            '''
+            cur = conn.cursor()
+            cur.execute(query_buy, (day_after, limit))
+            row = cur.fetchone()
+            buy_count = row[0] or 0
+            buy_wins  = row[1] or 0
+            buy_avg   = row[2] or 0.0
+
+            # 전체 매도 집계 (음수 수익률이 HIT, 이상값 제외)
+            query_sell = '''
+                SELECT
+                    COUNT(*) as cnt,
+                    SUM(CASE WHEN p.return_pct < 0 THEN 1 ELSE 0 END) as wins,
+                    AVG(p.return_pct) as avg_ret
+                FROM daily_recommendations r
+                INNER JOIN price_tracking p
+                    ON r.id = p.recommendation_id AND p.day_after = ?
+                WHERE r.recommendation_type = 'SELL'
+                  AND ABS(p.return_pct) < ?
+            '''
+            cur.execute(query_sell, (day_after, limit))
+            row = cur.fetchone()
+            sell_count = row[0] or 0
+            sell_wins  = row[1] or 0
+            sell_avg   = row[2] or 0.0
+
+            total_count = buy_count + sell_count
+            if total_count == 0:
+                continue
+
+            buy_win_rate  = (buy_wins / buy_count * 100)   if buy_count  > 0 else 0.0
+            sell_win_rate = (sell_wins / sell_count * 100) if sell_count > 0 else 0.0
+
+            # 시장별 집계 (이상값 제외)
+            by_market = {}
+            for market in ('KOSPI', 'KOSDAQ', 'US'):
+                cur.execute('''
+                    SELECT
+                        COUNT(*) as cnt,
+                        SUM(CASE WHEN p.return_pct > 0 THEN 1 ELSE 0 END) as wins,
+                        AVG(p.return_pct) as avg_ret
+                    FROM daily_recommendations r
+                    INNER JOIN price_tracking p
+                        ON r.id = p.recommendation_id AND p.day_after = ?
+                    WHERE r.recommendation_type = 'BUY' AND r.market = ?
+                      AND ABS(p.return_pct) < ?
+                ''', (day_after, market, limit))
+                mrow = cur.fetchone()
+                mcnt = mrow[0] or 0
+                if mcnt > 0:
+                    by_market[market] = {
+                        "buy_count":    mcnt,
+                        "buy_win_rate": round((mrow[1] or 0) / mcnt * 100, 1),
+                        "buy_avg_return": round(mrow[2] or 0.0, 2),
+                    }
+
+            by_period[day_after] = {
+                "buy_count":      buy_count,
+                "buy_win_rate":   round(buy_win_rate, 1),
+                "buy_avg_return": round(buy_avg, 2),
+                "sell_count":     sell_count,
+                "sell_win_rate":  round(sell_win_rate, 1),
+                "sell_avg_return": round(sell_avg, 2),
+                "by_market":      by_market,
+            }
+
+        # ── 최근 20거래일 내 추천의 5일 성과 ──────────────────────
+        recent_results = []
+        cur.execute('''
+            SELECT
+                r.date, r.market, r.ticker, r.name,
+                r.recommendation_type, r.rank, r.price,
+                p.close_price, p.return_pct
+            FROM daily_recommendations r
+            INNER JOIN price_tracking p
+                ON r.id = p.recommendation_id AND p.day_after = 5
+            WHERE r.date >= date('now', '-30 days')
+              AND ABS(p.return_pct) < 30
+            ORDER BY r.date DESC, r.recommendation_type, r.rank
+            LIMIT 50
+        ''')
+        for row in cur.fetchall():
+            date_, market, ticker, name, rtype, rank, entry, exit_, ret = row
+            if ret is None:
+                continue
+            # BUY면 수익(양수)=HIT, SELL이면 손실(음수)=HIT
+            if rtype == 'BUY':
+                result = 'HIT' if ret > 0 else 'MISS'
+            else:
+                result = 'HIT' if ret < 0 else 'MISS'
+            recent_results.append({
+                "date":        date_,
+                "market":      market,
+                "ticker":      ticker,
+                "name":        name,
+                "type":        rtype,
+                "rank":        rank,
+                "entry_price": entry,
+                "exit_price":  exit_,
+                "return_pct":  round(ret, 2),
+                "result":      result,
+            })
+
+        conn.close()
+
+        # ── 요약 ───────────────────────────────────────────────────
+        total_verified = sum(
+            v["buy_count"] + v["sell_count"] for v in by_period.values()
+        )
+
+        # 가장 승률 높은 day_after (매수 기준)
+        best_day_after = 5
+        best_rate = -1.0
+        for d, v in by_period.items():
+            if v["buy_count"] >= 3 and v["buy_win_rate"] > best_rate:
+                best_rate = v["buy_win_rate"]
+                best_day_after = d
+
+        # 전체 매수/매도 승률 (5일 기준)
+        p5 = by_period.get(5, {})
+        overall_buy_win_rate  = p5.get("buy_win_rate",  0.0)
+        overall_sell_win_rate = p5.get("sell_win_rate", 0.0)
+
+        return {
+            "by_period":     by_period,
+            "recent_results": recent_results,
+            "summary": {
+                "best_day_after":       best_day_after,
+                "overall_buy_win_rate": overall_buy_win_rate,
+                "overall_sell_win_rate": overall_sell_win_rate,
+                "total_verified":       total_verified,
+            },
+        }
+
+    except Exception as e:
+        print(f"  ⚠️ verify_past_recommendations 실패: {e}")
+        return {"by_period": {}, "recent_results": [], "summary": {
+            "best_day_after": 5,
+            "overall_buy_win_rate": 0.0,
+            "overall_sell_win_rate": 0.0,
+            "total_verified": 0,
+        }}
+
+
+def format_verification_section() -> str:
+    """
+    verify_past_recommendations() 결과를 텍스트 리포트 섹션으로 포맷.
+    검증 가능한 데이터가 없으면 빈 문자열 반환.
+    """
+    data = verify_past_recommendations()
+    by_period = data.get("by_period", {})
+    recent    = data.get("recent_results", [])
+    summary   = data.get("summary", {})
+
+    if not by_period and not recent:
+        return ""
+
+    L = []
+    L.append("=" * 80)
+    L.append("  📊 추천 검증 리포트 (과거 추천 실적)")
+    L.append("=" * 80)
+
+    # ── 기간별 검증 결과 ───────────────────────────────────────
+    if by_period:
+        L.append("")
+        L.append("  ── 기간별 검증 결과 ──────────────────────────────────────────────────────────")
+        for day_after in sorted(by_period.keys()):
+            v = by_period[day_after]
+            buy_part  = ""
+            sell_part = ""
+            if v["buy_count"] > 0:
+                buy_part = (f"매수 승률: {v['buy_win_rate']:.1f}% "
+                            f"({v['buy_count']}건) 평균수익 {v['buy_avg_return']:+.1f}%")
+            if v["sell_count"] > 0:
+                sell_part = (f"매도 승률: {v['sell_win_rate']:.1f}% "
+                             f"({v['sell_count']}건)")
+            parts = [p for p in [buy_part, sell_part] if p]
+            if parts:
+                label = f"[{day_after:>2d}일 후 기준]"
+                L.append(f"  {label}  " + " | ".join(parts))
+
+    # ── 최근 추천 실적 (5일 후) ────────────────────────────────
+    if recent:
+        L.append("")
+        L.append("  ── 최근 추천 실적 (5일 후) ──────────────────────────────────────────────────")
+        for r in recent:
+            icon   = "✅ HIT " if r["result"] == "HIT" else "❌ MISS"
+            ticker = r["ticker"].replace(".KS", "").replace(".KQ", "")
+            entry  = r["entry_price"]
+            exit_  = r["exit_price"]
+            ret    = r["return_pct"]
+            sign   = "+" if ret >= 0 else ""
+            # 가격 포맷: 큰 숫자(한국주)는 정수, 소수점 필요한 것은 2자리
+            def fmt_price(p):
+                if p is None:
+                    return "N/A"
+                return f"{p:,.0f}" if p >= 1000 else f"{p:,.2f}"
+            L.append(
+                f"  {icon}  {r['date']} [{r['market']:6s}] "
+                f"{r['name'][:10]:10s}({ticker:8s}) "
+                f"{r['type']} #{r['rank']}  "
+                f"{sign}{ret:.1f}%  "
+                f"({fmt_price(entry)}→{fmt_price(exit_)})"
+            )
+
+    # ── 종합 요약 ──────────────────────────────────────────────
+    if summary.get("total_verified", 0) > 0:
+        L.append("")
+        L.append(f"  총 검증 건수: {summary['total_verified']}건 | "
+                 f"최우수 기간: {summary['best_day_after']}일 후 | "
+                 f"5일 매수 승률: {summary['overall_buy_win_rate']:.1f}% | "
+                 f"5일 매도 승률: {summary['overall_sell_win_rate']:.1f}%")
+
+    L.append("=" * 80)
+    return "\n".join(L)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -289,9 +606,12 @@ def analyze_performance(period_days: int = 30) -> dict:
     # 분석 시작일
     start_date = (datetime.datetime.now() - datetime.timedelta(days=period_days)).strftime('%Y-%m-%d')
     
-    # 매수 추천 성과 분석
+    # 이상값 필터 기준 (±30% 초과 수익률은 데이터 오류로 간주)
+    _OUTLIER_LIMIT = 30
+
+    # 매수 추천 성과 분석 (이상값 제외)
     query = '''
-        SELECT 
+        SELECT
             r.market,
             COUNT(*) as total_count,
             AVG(p.return_pct) as avg_return,
@@ -299,43 +619,47 @@ def analyze_performance(period_days: int = 30) -> dict:
             MAX(p.return_pct) as max_return,
             MIN(p.return_pct) as min_return
         FROM daily_recommendations r
-        LEFT JOIN price_tracking p ON r.id = p.recommendation_id AND p.day_after = 5
+        INNER JOIN price_tracking p ON r.id = p.recommendation_id AND p.day_after = 5
         WHERE r.date >= ? AND r.recommendation_type = 'BUY'
+          AND ABS(p.return_pct) < ?
         GROUP BY r.market
     '''
-    
-    buy_performance = pd.read_sql_query(query, conn, params=[start_date])
-    
-    # 매도 추천 성과 분석
+
+    buy_performance = pd.read_sql_query(query, conn, params=[start_date, _OUTLIER_LIMIT])
+
+    # 매도 추천 성과 분석 (이상값 제외)
     query = '''
-        SELECT 
+        SELECT
             r.market,
             COUNT(*) as total_count,
             AVG(p.return_pct) as avg_return,
             SUM(CASE WHEN p.return_pct < 0 THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as win_rate
         FROM daily_recommendations r
-        LEFT JOIN price_tracking p ON r.id = p.recommendation_id AND p.day_after = 5
+        INNER JOIN price_tracking p ON r.id = p.recommendation_id AND p.day_after = 5
         WHERE r.date >= ? AND r.recommendation_type = 'SELL'
+          AND ABS(p.return_pct) < ?
         GROUP BY r.market
     '''
-    
-    sell_performance = pd.read_sql_query(query, conn, params=[start_date])
-    
-    # 투자자별 성과 분석
+
+    sell_performance = pd.read_sql_query(query, conn, params=[start_date, _OUTLIER_LIMIT])
+
+    # 투자자별 성과 분석 (이상값 제외)
     query = '''
-        SELECT 
+        SELECT
             r.investor_tags,
             COUNT(*) as total_count,
             AVG(p.return_pct) as avg_return,
             SUM(CASE WHEN p.return_pct > 0 THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as win_rate
         FROM daily_recommendations r
-        LEFT JOIN price_tracking p ON r.id = p.recommendation_id AND p.day_after = 5
-        WHERE r.date >= ? AND r.recommendation_type = 'BUY' AND r.investor_tags != '해당없음'
+        INNER JOIN price_tracking p ON r.id = p.recommendation_id AND p.day_after = 5
+        WHERE r.date >= ? AND r.recommendation_type = 'BUY'
+          AND r.investor_tags != '해당없음'
+          AND ABS(p.return_pct) < ?
         GROUP BY r.investor_tags
         ORDER BY avg_return DESC
     '''
-    
-    investor_performance = pd.read_sql_query(query, conn, params=[start_date])
+
+    investor_performance = pd.read_sql_query(query, conn, params=[start_date, _OUTLIER_LIMIT])
     
     conn.close()
     

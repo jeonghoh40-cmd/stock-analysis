@@ -23,6 +23,10 @@ BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
 _CACHE_F   = os.path.join(BASE_DIR, "investor_live_cache.json")
 _CACHE_TTL = 24   # hours
 
+# 정적 데이터 할인 계수 — 라이브 데이터 실패 시 정적 포트폴리오 영향력 감소
+_STATIC_DISCOUNT = 0.5           # Pelosi/ARK 정적 시 50% 할인
+_KOREAN_STATIC_DISCOUNT = 0.6    # 한국 투자자 60% (100% 정적이므로)
+
 # ─── 캐시 I/O ──────────────────────────────────────────────────
 def _load_live_cache() -> dict:
     try:
@@ -259,12 +263,13 @@ def get_investor_score(ticker: str) -> dict:
     else:
         is_pelosi = clean in PELOSI_PORTFOLIO
 
+    pelosi_source = 'live' if live_pelosi else 'static'
     if is_pelosi:
         if live_pelosi:
             pelosi_score = 15           # 라이브 API: 의회 공시 실제 매수 = 최고 점수
         else:
             w = PELOSI_PORTFOLIO.get(clean, {}).get("weight", 0)
-            pelosi_score = min(15, w // 7 + 1)
+            pelosi_score = int(min(15, w // 7 + 1) * _STATIC_DISCOUNT)
         investor_notes.append(
             f"Pelosi 매수: {PELOSI_PORTFOLIO.get(clean, {}).get('note', clean)}"
         )
@@ -278,10 +283,13 @@ def get_investor_score(ticker: str) -> dict:
         is_ark  = clean in ARK_TOP_HOLDINGS
         ark_w   = ARK_TOP_HOLDINGS.get(clean, {}).get("weight", 0) / 100.0  # 정규화
 
+    ark_source = 'live' if live_ark else 'static'
     if   ark_w >= 1.0: ark_score = 15
     elif ark_w >= 0.5: ark_score = 10
     elif is_ark:       ark_score = 5
     else:              ark_score = 0
+    if not live_ark and ark_score > 0:
+        ark_score = int(ark_score * _STATIC_DISCOUNT)
 
     if is_ark:
         investor_notes.append(
@@ -302,13 +310,15 @@ def get_investor_score(ticker: str) -> dict:
             w = portfolio[clean].get("weight", 0)
             korean_score += min(5, w // 5 + 1)
             investor_notes.append(f"{inv_name}: {portfolio[clean]['note']}")
-    korean_score = min(25, korean_score)
+    korean_score = int(min(25, korean_score) * _KOREAN_STATIC_DISCOUNT)
 
     return {
         'is_pelosi_pick':        is_pelosi,
         'pelosi_score':          pelosi_score,
+        'pelosi_source':         pelosi_source,
         'is_ark_pick':           is_ark,
         'ark_score':             ark_score,
+        'ark_source':            ark_source,
         'ark_weight':            round(ark_w, 4),
         'korean_investor_score': korean_score,
         'is_korean_investor_pick': korean_score > 0,

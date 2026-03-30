@@ -373,22 +373,7 @@ CHINA_ETF_POOL = {
         "risk": "중급",
         "weight_recommend": 0,
     },
-    "TIGER 차이나항셍H주": {
-        "ticker": "152280.KS",
-        "category": "지수형/H주",
-        "description": "홍콩 항셍 H주 25 블루칩 집중",
-        "reason": "중국 빅4 은행·보험·에너지 등 초대형 국유주 포함",
-        "risk": "중급",
-        "weight_recommend": 0,
-    },
-    "KBSTAR 중국본토대형주CSI100": {
-        "ticker": "304850.KS",
-        "category": "지수형/A주",
-        "description": "CSI100 초대형주 집중 (상위 100개)",
-        "reason": "CSI300 대비 더 집중된 우량 대형주 포트폴리오",
-        "risk": "중급",
-        "weight_recommend": 0,
-    },
+    # "TIGER 차이나항셍H주" (152280.KS), "KBSTAR 중국본토대형주CSI100" (304850.KS) — 상폐/yfinance 미지원으로 제거
     # ── 테마형 ──────────────────────────────────────────────────
     "KODEX 차이나항셍테크": {
         "ticker": "371160.KS",
@@ -414,14 +399,7 @@ CHINA_ETF_POOL = {
         "risk": "중상급",
         "weight_recommend": 15,
     },
-    "ACE 중국본토CSI300": {
-        "ticker": "420330.KS",
-        "category": "지수형/A주",
-        "description": "한화자산운용 CSI300 직접 복제",
-        "reason": "직접 복제 방식으로 추적오차 최소화",
-        "risk": "중급",
-        "weight_recommend": 0,
-    },
+    # "ACE 중국본토CSI300" (420330.KS) — yfinance 미지원으로 제거
     "KODEX 차이나과창판STAR50합성": {
         "ticker": "391600.KS",
         "category": "테마형/혁신",
