@@ -1,0 +1,12 @@
+node_modules
+.next
+.git
+.env*
+!.env.example
+*.md
+!CLAUDE.md
+!AGENTS.md
+vc_investment_analyzer/.git
+vc_investment_analyzer/.venv
+vc_investment_analyzer/__pycache__
+reports
