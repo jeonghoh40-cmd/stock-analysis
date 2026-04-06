@@ -184,7 +184,7 @@ export default function RunPage() {
         투자 분석 실행
       </h1>
       <p className="mb-8 text-sm text-zinc-500">
-        IR 자료를 기반으로 투심위 보고서를 생성합니다.
+        IR 자료를 기반으로 투자검토보고서를 생성합니다.
       </p>
 
       <div className="space-y-6 rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
