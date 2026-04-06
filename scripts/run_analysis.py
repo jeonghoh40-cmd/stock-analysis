@@ -13,9 +13,11 @@ vc_investment_analyzer의 기능을 순차적으로 실행한다.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 ANALYZER_ROOT = Path(
@@ -39,6 +41,57 @@ def run_step(label: str, args: list[str], cwd: Path) -> int:
     )
     proc.wait()
     return proc.returncode
+
+
+def ensure_analysis_json(company: str, analysis_dir: Path, ir_dir: Path) -> None:
+    """analysis.json이 없으면 최소한의 기본 데이터를 생성한다.
+
+    batch_ic_report.py가 analysis.json 존재를 필수로 요구하므로,
+    IR 텍스트만 있는 신규 기업의 경우 기본 구조를 만들어준다.
+    """
+    aj_path = analysis_dir / "analysis.json"
+    if aj_path.exists():
+        print(f"  analysis.json 이미 존재: {aj_path}")
+        return
+
+    # IR 폴더에서 파일 목록 수집
+    ir_files = []
+    if ir_dir.is_dir():
+        ir_files = [f.name for f in ir_dir.iterdir() if f.is_file() and not f.name.startswith("~")]
+
+    analysis = {
+        "company": {
+            "name": company,
+            "total_name": company,
+        },
+        "classification": {
+            "sector": [],
+            "investment_era": "2024~(AI시대)",
+            "investment_stage": "UNKNOWN",
+            "founder_grade": "FOUNDER_UNKNOWN",
+            "market_grade": "UNKNOWN",
+            "market_position": "UNKNOWN",
+            "global_expansion": "UNKNOWN",
+            "vc_liquidity": "UNKNOWN",
+            "tech_listing": "UNKNOWN",
+        },
+        "investment": {
+            "investment_date": datetime.now().strftime("%Y-%m-%d"),
+            "total_invested_krw": 0,
+        },
+        "ir_source": {
+            "folder": str(ir_dir),
+            "files": ir_files,
+            "extracted_at": datetime.now().isoformat(),
+        },
+        "_auto_generated": True,
+        "_note": "IR 텍스트 기반 자동 생성. Claude API가 IR 내용을 분석하여 보고서를 작성합니다.",
+    }
+
+    with open(aj_path, "w", encoding="utf-8") as f:
+        json.dump(analysis, f, ensure_ascii=False, indent=2)
+
+    print(f"  analysis.json 자동 생성: {aj_path}")
 
 
 def main():
@@ -72,12 +125,18 @@ def main():
         "--company", company,
         "--output", str(analysis_out),
     ]
-    rc = run_step("Step 1/2: IR 텍스트 추출", extract_args, ANALYZER_ROOT)
+    rc = run_step("Step 1/3: IR 텍스트 추출", extract_args, ANALYZER_ROOT)
     if rc != 0:
         print(f"\n[ERROR] IR 추출 실패 (exit code: {rc})")
         sys.exit(rc)
 
-    # Step 2: 투심위 보고서 생성
+    # Step 2: analysis.json 확인/생성
+    print(f"\n{'='*60}")
+    print(f"  [Step 2/3: 분석 데이터 확인]")
+    print(f"{'='*60}\n", flush=True)
+    ensure_analysis_json(company, analysis_out, ir_dir)
+
+    # Step 3: 투심위 보고서 생성
     report_args = [
         sys.executable,
         "-m", "scripts.batch_ic_report",
@@ -89,7 +148,7 @@ def main():
     if args.no_api:
         report_args.append("--no-api")
 
-    rc = run_step("Step 2/2: 투심위 보고서 생성", report_args, ANALYZER_ROOT)
+    rc = run_step("Step 3/3: 투심위 보고서 생성", report_args, ANALYZER_ROOT)
     if rc != 0:
         print(f"\n[ERROR] 보고서 생성 실패 (exit code: {rc})")
         sys.exit(rc)
