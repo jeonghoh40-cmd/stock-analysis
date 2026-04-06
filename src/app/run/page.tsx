@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useRef, useCallback } from "react"
+import FileBrowser from "@/components/ui/file-browser"
 
 type LogEntry = {
   type: "info" | "stdout" | "stderr" | "done" | "error"
@@ -32,6 +33,10 @@ export default function RunPage() {
   const [outputMode, setOutputMode] = useState<OutputMode>("network")
   const [outputDir, setOutputDir] = useState("")
   const localOutputDir = "/data/reports" // Docker 내 기본 저장 경로
+
+  // 파일 탐색기
+  const [irBrowseOpen, setIrBrowseOpen] = useState(false)
+  const [outputBrowseOpen, setOutputBrowseOpen] = useState(false)
 
   // 옵션
   const [noWeb, setNoWeb] = useState(false)
@@ -246,16 +251,36 @@ export default function RunPage() {
 
           {sourceMode === "network" ? (
             <div>
-              <input
-                type="text"
-                value={irDir}
-                onChange={(e) => setIrDir(e.target.value)}
-                placeholder="예: \\\\서버명\공유폴더\CSO  또는  V:\DEPT\Venture\...\CSO"
-                disabled={running}
-                className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm font-mono text-zinc-900 placeholder:text-zinc-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-              />
+              <div className="flex gap-2">
+                <div
+                  className={`flex flex-1 items-center rounded-md border px-3 py-2 ${
+                    irDir
+                      ? "border-zinc-300 dark:border-zinc-700"
+                      : "border-dashed border-zinc-300 dark:border-zinc-700"
+                  } bg-white dark:bg-zinc-800`}
+                >
+                  {irDir ? (
+                    <span className="truncate font-mono text-sm text-zinc-900 dark:text-zinc-100">
+                      {irDir}
+                    </span>
+                  ) : (
+                    <span className="text-sm text-zinc-400">폴더를 선택하세요</span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIrBrowseOpen(true)}
+                  disabled={running}
+                  className="flex shrink-0 items-center gap-1.5 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700"
+                >
+                  <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" />
+                  </svg>
+                  찾아보기
+                </button>
+              </div>
               <p className="mt-1 text-xs text-zinc-400">
-                사내 네트워크 드라이브 또는 공유 폴더 경로 (서버에서 접근 가능해야 함)
+                서버의 드라이브 또는 네트워크 폴더에서 IR 자료 폴더를 선택
               </p>
             </div>
           ) : (
@@ -367,16 +392,36 @@ export default function RunPage() {
 
           {outputMode === "network" ? (
             <div>
-              <input
-                type="text"
-                value={outputDir}
-                onChange={(e) => setOutputDir(e.target.value)}
-                placeholder="예: \\\\서버명\공유폴더\reports  또는  V:\DEPT\reports"
-                disabled={running}
-                className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm font-mono text-zinc-900 placeholder:text-zinc-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-              />
+              <div className="flex gap-2">
+                <div
+                  className={`flex flex-1 items-center rounded-md border px-3 py-2 ${
+                    outputDir
+                      ? "border-zinc-300 dark:border-zinc-700"
+                      : "border-dashed border-zinc-300 dark:border-zinc-700"
+                  } bg-white dark:bg-zinc-800`}
+                >
+                  {outputDir ? (
+                    <span className="truncate font-mono text-sm text-zinc-900 dark:text-zinc-100">
+                      {outputDir}
+                    </span>
+                  ) : (
+                    <span className="text-sm text-zinc-400">폴더를 선택하세요</span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setOutputBrowseOpen(true)}
+                  disabled={running}
+                  className="flex shrink-0 items-center gap-1.5 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700"
+                >
+                  <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" />
+                  </svg>
+                  찾아보기
+                </button>
+              </div>
               <p className="mt-1 text-xs text-zinc-400">
-                생성된 Word 보고서가 저장될 네트워크 경로
+                생성된 Word 보고서가 저장될 폴더를 선택
               </p>
             </div>
           ) : (
@@ -519,6 +564,21 @@ export default function RunPage() {
           </div>
         </div>
       )}
+      {/* ─── 파일 탐색기 모달 ─── */}
+      <FileBrowser
+        open={irBrowseOpen}
+        onClose={() => setIrBrowseOpen(false)}
+        onSelect={(path) => setIrDir(path)}
+        mode="directory"
+        title="IR 자료 폴더 선택"
+      />
+      <FileBrowser
+        open={outputBrowseOpen}
+        onClose={() => setOutputBrowseOpen(false)}
+        onSelect={(path) => setOutputDir(path)}
+        mode="directory"
+        title="리포트 저장 폴더 선택"
+      />
     </div>
   )
 }
