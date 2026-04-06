@@ -251,14 +251,21 @@ def main():
         sys.exit(rc)
 
     # 생성된 보고서를 output_dir로 복사
-    reports_dir = ANALYZER_ROOT / "reports"
     import shutil
+    import time
+    reports_dir = ANALYZER_ROOT / "reports"
     copied = False
     for f in sorted(reports_dir.glob(f"{company}_투자검토보고서_*.docx"), reverse=True):
         dest = output_dir / f.name
-        shutil.copy2(f, dest)
-        print(f"\n  보고서 복사: {dest}")
-        copied = True
+        for attempt in range(5):
+            try:
+                time.sleep(1)
+                shutil.copy2(f, dest)
+                print(f"\n  보고서 복사: {dest}")
+                copied = True
+                break
+            except PermissionError:
+                print(f"  파일 복사 재시도 ({attempt + 1}/5)...")
         break
 
     if not copied:
