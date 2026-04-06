@@ -96,16 +96,13 @@ export default function FileBrowser({
     }
   }
 
-  const filteredEntries =
-    mode === "directory"
-      ? entries.filter((e) => e.isDir)
-      : fileFilter
-        ? entries.filter(
-            (e) =>
-              e.isDir ||
-              fileFilter.some((ext) => e.name.toLowerCase().endsWith(ext))
-          )
-        : entries
+  const filteredEntries = fileFilter
+    ? entries.filter(
+        (e) =>
+          e.isDir ||
+          fileFilter.some((ext) => e.name.toLowerCase().endsWith(ext))
+      )
+    : entries
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">

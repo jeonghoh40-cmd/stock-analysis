@@ -16,7 +16,6 @@ async function getRoots(): Promise<EntryInfo[]> {
   const roots: EntryInfo[] = []
 
   if (process.platform === "win32") {
-    // Windows: 드라이브 문자 탐색
     for (const letter of "CDEFGHIJKLMNOPQRSTUVWXYZ") {
       const drive = `${letter}:\\`
       try {
@@ -29,14 +28,11 @@ async function getRoots(): Promise<EntryInfo[]> {
           modified: "",
         })
       } catch {
-        // 존재하지 않는 드라이브
+        // skip
       }
     }
   } else {
-    // Linux/Mac
     roots.push({ name: "/", path: "/", isDir: true, size: 0, modified: "" })
-
-    // Docker 마운트 경로
     for (const dir of ["/data", "/mnt"]) {
       try {
         await fs.access(dir)
@@ -47,7 +43,6 @@ async function getRoots(): Promise<EntryInfo[]> {
     }
   }
 
-  // 홈 디렉토리
   const home = os.homedir()
   roots.push({ name: "홈 폴더", path: home, isDir: true, size: 0, modified: "" })
 
@@ -57,7 +52,6 @@ async function getRoots(): Promise<EntryInfo[]> {
 export async function POST(request: NextRequest) {
   const { dirPath } = await request.json()
 
-  // dirPath가 없으면 루트 목록 반환
   if (!dirPath) {
     const roots = await getRoots()
     return Response.json({ entries: roots, currentPath: "", parentPath: null })
@@ -65,26 +59,37 @@ export async function POST(request: NextRequest) {
 
   try {
     const resolvedPath = path.resolve(dirPath)
+
+    // 먼저 경로 접근 가능 여부 확인
+    await fs.access(resolvedPath)
+
+    const names = await fs.readdir(resolvedPath)
     const entries: EntryInfo[] = []
-    const dirEntries = await fs.readdir(resolvedPath, { withFileTypes: true })
 
-    for (const entry of dirEntries) {
+    for (const name of names) {
       // 숨김 파일/시스템 폴더 제외
-      if (entry.name.startsWith(".") || entry.name.startsWith("$")) continue
-      if (["node_modules", "__pycache__", ".git"].includes(entry.name)) continue
+      if (name.startsWith(".") || name.startsWith("$") || name.startsWith("~")) continue
+      if (["node_modules", "__pycache__", ".git", "System Volume Information"].includes(name)) continue
 
-      const fullPath = path.join(resolvedPath, entry.name)
+      const fullPath = path.join(resolvedPath, name)
       try {
         const stat = await fs.stat(fullPath)
         entries.push({
-          name: entry.name,
+          name,
           path: fullPath,
           isDir: stat.isDirectory(),
-          size: stat.size,
+          size: stat.isDirectory() ? 0 : stat.size,
           modified: stat.mtime.toISOString(),
         })
       } catch {
-        // 접근 불가한 파일 건너뛰기
+        // stat 실패해도 폴더일 가능성이 있으므로 기본값으로 추가
+        entries.push({
+          name,
+          path: fullPath,
+          isDir: true,
+          size: 0,
+          modified: "",
+        })
       }
     }
 
@@ -110,11 +115,9 @@ export async function POST(request: NextRequest) {
       message = `접근 권한이 없습니다: ${dirPath}`
     } else if (e.code === "ENOTDIR") {
       message = `폴더가 아닙니다: ${dirPath}`
-    } else if (e.message?.includes("network")) {
-      message = `네트워크 경로에 접근할 수 없습니다. 드라이브가 연결되어 있는지 확인하세요: ${dirPath}`
     }
     return Response.json(
-      { error: message, entries: [], currentPath: dirPath, parentPath: null },
+      { error: `${message} [${e.code || "UNKNOWN"}]`, entries: [], currentPath: dirPath, parentPath: null },
       { status: 400 }
     )
   }
