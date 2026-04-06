@@ -20,9 +20,21 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-ANALYZER_ROOT = Path(
-    os.environ.get("ANALYZER_ROOT", Path(__file__).resolve().parent.parent.parent / "vc_investment_analyzer")
-)
+def find_analyzer_root() -> Path:
+    """vc_investment_analyzer 또는 vc-investment-analyzer 디렉토리를 찾는다."""
+    if os.environ.get("ANALYZER_ROOT"):
+        return Path(os.environ["ANALYZER_ROOT"])
+
+    base = Path(__file__).resolve().parent.parent.parent
+    for name in ["vc_investment_analyzer", "vc-investment-analyzer"]:
+        candidate = base / name
+        if candidate.is_dir():
+            return candidate
+
+    # fallback
+    return base / "vc_investment_analyzer"
+
+ANALYZER_ROOT = find_analyzer_root()
 
 DEFAULT_CODES = {
     "sector": [],
