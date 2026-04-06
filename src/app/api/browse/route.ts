@@ -101,9 +101,20 @@ export async function POST(request: NextRequest) {
       currentPath: resolvedPath,
       parentPath: parentPath !== resolvedPath ? parentPath : null,
     })
-  } catch (err) {
+  } catch (err: unknown) {
+    const e = err as NodeJS.ErrnoException
+    let message = `경로를 열 수 없습니다: ${dirPath}`
+    if (e.code === "ENOENT") {
+      message = `경로가 존재하지 않습니다: ${dirPath}`
+    } else if (e.code === "EACCES" || e.code === "EPERM") {
+      message = `접근 권한이 없습니다: ${dirPath}`
+    } else if (e.code === "ENOTDIR") {
+      message = `폴더가 아닙니다: ${dirPath}`
+    } else if (e.message?.includes("network")) {
+      message = `네트워크 경로에 접근할 수 없습니다. 드라이브가 연결되어 있는지 확인하세요: ${dirPath}`
+    }
     return Response.json(
-      { error: `경로를 열 수 없습니다: ${err}`, entries: [], currentPath: dirPath, parentPath: null },
+      { error: message, entries: [], currentPath: dirPath, parentPath: null },
       { status: 400 }
     )
   }
