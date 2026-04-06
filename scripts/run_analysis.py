@@ -75,7 +75,7 @@ def ensure_codes_json(company: str, analysis_dir: Path) -> Path:
             ir_text = ir_path.read_text(encoding="utf-8")[:10000]
             client = anthropic.Anthropic()
             response = client.messages.create(
-                model="claude-sonnet-4-6-20250514",
+                model="claude-sonnet-4-5-20241022",
                 max_tokens=1024,
                 system="IR 자료를 분석하여 투자 분류 코드를 JSON으로 반환하세요. 반드시 유효한 JSON만 반환.",
                 messages=[{
@@ -228,7 +228,7 @@ def main():
     # Step 4: 투자검토보고서 생성 (gen_report.py)
     report_args = [
         sys.executable,
-        "scripts/gen_report.py",
+        "-m", "scripts.gen_report",
         "--company", company,
         "--codes", str(codes_path),
     ]
