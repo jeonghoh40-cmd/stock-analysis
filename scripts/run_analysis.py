@@ -89,22 +89,23 @@ def ensure_codes_json(company: str, analysis_dir: Path) -> Path:
             response = client.messages.create(
                 model="claude-sonnet-4-20250514",
                 max_tokens=1024,
+                temperature=0,
                 system="IR 자료를 분석하여 투자 분류 코드를 JSON으로 반환하세요. 반드시 유효한 JSON만 반환.",
                 messages=[{
                     "role": "user",
-                    "content": f"""아래 IR 자료를 읽고 분류 코드를 JSON으로 반환하세요.
+                    "content": f"""아래 IR 자료를 읽고 분류 코드를 JSON으로 반환하세요. 근거가 불충분하면 보수적으로(낮은 등급) 판정하세요.
 
-가능한 값:
-- sector: ["SW","DEEPTECH","BIO","HEALTHCARE","COMMERCE","FOOD","PLATFORM","LOGISTICS","O2O","CONTENT","AI","FINTECH","ENERGY","MANUFACTURING","GLOBAL","ENTERTAINMENT","SECURITY","MOBILITY","AGRITECH","PROPTECH","EDTECH","GAMING","HARDWARE"] (복수 선택)
-- stage: "Seed/Pre-A", "Series-A", "Series-B", "Series-C+", "Pre-IPO", "Growth"
-- founder_grade: "FOUNDER_A"(연쇄창업/업계경력10년+), "FOUNDER_B"(관련경력), "FOUNDER_C"(신입)
-- market_grade: "MARKET_S"(글로벌 메가), "MARKET_A"(대규모 구조적 성장), "MARKET_B"(중간), "MARKET_C"(소규모)
-- market_position: "POS_1ST", "POS_CONTENDER", "POS_CREATING", "POS_FOLLOWER", "POS_STARTUP"
-- global_expansion: "GLOBAL_BORN"(해외매출50%+), "GLOBAL_READY"(해외진출준비), "GLOBAL_ACTIVE"(해외사업진행), "GLOBAL_DOMESTIC"(국내중심)
-- era: "ERA_AI"
-- urgency_grade: "STABLE", "CAUTION", "WARNING"
-- tech_listing: "TECH_LISTED", "TECH_ELIGIBLE", "TECH_NOT_ELIGIBLE"
-- vc_liquidity: "LIQUIDITY_TIGHT", "LIQUIDITY_NORMAL"
+판정 기준:
+- sector: 복수 선택. ["SW","DEEPTECH","BIO","HEALTHCARE","COMMERCE","FOOD","PLATFORM","LOGISTICS","O2O","CONTENT","AI","FINTECH","ENERGY","MANUFACTURING","GLOBAL","ENTERTAINMENT","SECURITY","MOBILITY","AGRITECH","PROPTECH","EDTECH","GAMING","HARDWARE"]
+- stage: IR에 명시된 투자 라운드 기준. "Seed/Pre-A"(시드~Pre-A), "Series-A", "Series-B", "Series-C+", "Pre-IPO"(상장 직전), "Growth". 명시되지 않으면 임직원수/매출 규모로 추정.
+- founder_grade: "FOUNDER_A"(교수/박사+10년 이상 도메인 전문가, 연쇄창업 성공, 글로벌 기업 임원 출신), "FOUNDER_B"(관련 분야 경력 보유, 일반적 수준), "FOUNDER_C"(경력 부족/신입). IR에서 경력이 명확히 드러나지 않으면 FOUNDER_B로 판정.
+- market_grade: "MARKET_S"(TAM 1조원+ 글로벌 메가 트렌드), "MARKET_A"(수천억 이상 구조적 성장), "MARKET_B"(수백억 규모 또는 니치), "MARKET_C"(소규모)
+- market_position: "POS_1ST"(매출/점유율 1위 또는 유일한 기업), "POS_CREATING"(기존에 없던 새로운 카테고리를 창출하는 기업. 반드시 IR에서 '최초', '신시장', '새로운 카테고리' 등이 명확해야 함), "POS_CONTENDER"(시장에 경쟁자가 있고 상위권에 위치), "POS_FOLLOWER"(후발주자), "POS_STARTUP"(아직 시장 포지션이 불명확한 초기 스타트업). 근거가 불충분하면 POS_STARTUP으로 판정.
+- global_expansion: "GLOBAL_BORN"(해외 매출 50% 이상), "GLOBAL_READY"(해외 진출 준비 완료, 구체적 계획), "GLOBAL_ACTIVE"(해외 사업 진행 중), "GLOBAL_DOMESTIC"(국내 중심, 해외 계획 불명확)
+- era: "ERA_AI" (현재 고정)
+- urgency_grade: "STABLE"(런웨이 18개월+), "CAUTION"(런웨이 12개월+), "WARNING"(런웨이 부족). 재무 정보 없으면 "CAUTION".
+- tech_listing: "TECH_LISTED"(기술특례 상장 완료), "TECH_ELIGIBLE"(기술특례 상장 가능성 있음), "TECH_NOT_ELIGIBLE"(해당 없음)
+- vc_liquidity: "LIQUIDITY_TIGHT"(VC 시장 위축기), "LIQUIDITY_NORMAL"(일반적)
 
 IR 자료:
 {ir_text}
