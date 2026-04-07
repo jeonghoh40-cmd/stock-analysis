@@ -190,11 +190,43 @@ def ensure_analysis_json(company: str, analysis_dir: Path, ir_dir: Path) -> None
     print(f"  analysis.json 자동 생성: {aj_path}")
 
 
+def copy_latest_report(pattern: str, output_dir: Path, label: str) -> bool:
+    """reports 디렉토리에서 최신 보고서를 output_dir로 복사한다."""
+    import shutil
+    import time
+
+    reports_dir = ANALYZER_ROOT / "reports"
+    ic_reports_dir = reports_dir / "ic_reports"
+
+    # reports/ 와 reports/ic_reports/ 모두 검색
+    candidates = list(reports_dir.glob(pattern)) + list(ic_reports_dir.glob(pattern))
+    if not candidates:
+        print(f"\n  [WARN] {label} 파일을 찾지 못했습니다.")
+        return False
+
+    for f in sorted(candidates, key=lambda x: x.stat().st_mtime, reverse=True):
+        dest = output_dir / f.name
+        for attempt in range(5):
+            try:
+                time.sleep(1)
+                shutil.copy2(f, dest)
+                print(f"\n  {label} 복사: {dest}")
+                return True
+            except PermissionError:
+                print(f"  파일 복사 재시도 ({attempt + 1}/5)...")
+        break
+
+    return False
+
+
 def main():
-    parser = argparse.ArgumentParser(description="IR 추출 + 투자검토보고서 생성")
+    parser = argparse.ArgumentParser(description="IR 추출 + 보고서 생성")
     parser.add_argument("--company", required=True, help="기업명")
     parser.add_argument("--ir-dir", required=True, help="IR 자료 디렉토리 경로")
     parser.add_argument("--output-dir", required=True, help="리포트 저장 경로")
+    parser.add_argument("--report-type", default="both",
+                        choices=["investment", "ic", "both"],
+                        help="보고서 유형: investment(투자검토), ic(투심위), both(둘 다)")
     parser.add_argument("--no-web", action="store_true", help="웹 조사 건너뛰기")
     parser.add_argument("--no-api", action="store_true", help="Claude API 미사용")
     args = parser.parse_args()
@@ -202,6 +234,7 @@ def main():
     ir_dir = Path(args.ir_dir)
     output_dir = Path(args.output_dir)
     company = args.company
+    report_type = args.report_type
 
     if not ir_dir.is_dir():
         print(f"[ERROR] IR 디렉토리가 존재하지 않습니다: {ir_dir}")
@@ -209,11 +242,25 @@ def main():
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 분석 결과 저장 디렉토리
+    # 분석 결과 저장 디렉토리 (기존 데이터 정리 후 새로 생성)
     analysis_out = ANALYZER_ROOT / "data" / "analysis" / company
+    if analysis_out.exists():
+        import shutil
+        for old_file in ["ir_text.md", "analysis.json", "codes.json"]:
+            old_path = analysis_out / old_file
+            if old_path.exists():
+                old_path.unlink()
+                print(f"  기존 파일 정리: {old_file}")
     analysis_out.mkdir(parents=True, exist_ok=True)
 
+    # 단계 수 계산
+    gen_investment = report_type in ("investment", "both")
+    gen_ic = report_type in ("ic", "both")
+    total_steps = 3 + (1 if gen_investment else 0) + (1 if gen_ic else 0)
+    step = 0
+
     # Step 1: IR 텍스트 추출
+    step += 1
     extract_args = [
         sys.executable,
         "-m", "src.parser.ir_extractor",
@@ -221,55 +268,68 @@ def main():
         "--company", company,
         "--output", str(analysis_out),
     ]
-    rc = run_step("Step 1/4: IR 텍스트 추출", extract_args, ANALYZER_ROOT)
+    rc = run_step(f"Step {step}/{total_steps}: IR 텍스트 추출", extract_args, ANALYZER_ROOT)
     if rc != 0:
         print(f"\n[ERROR] IR 추출 실패 (exit code: {rc})")
         sys.exit(rc)
 
     # Step 2: 분류 코드 생성
+    step += 1
     print(f"\n{'='*60}")
-    print(f"  [Step 2/4: 분류 코드 생성]")
+    print(f"  [Step {step}/{total_steps}: 분류 코드 생성]")
     print(f"{'='*60}\n", flush=True)
     codes_path = ensure_codes_json(company, analysis_out)
 
     # Step 3: analysis.json 생성
+    step += 1
     print(f"\n{'='*60}")
-    print(f"  [Step 3/4: 분석 데이터 생성]")
+    print(f"  [Step {step}/{total_steps}: 분석 데이터 생성]")
     print(f"{'='*60}\n", flush=True)
     ensure_analysis_json(company, analysis_out, ir_dir)
 
-    # Step 4: 투자검토보고서 생성 (gen_report.py)
-    gen_report_path = ANALYZER_ROOT / "scripts" / "gen_report.py"
-    report_args = [
-        sys.executable,
-        str(gen_report_path),
-        "--company", company,
-        "--codes", str(codes_path),
-    ]
-    rc = run_step("Step 4/4: 투자검토보고서 생성", report_args, ANALYZER_ROOT)
-    if rc != 0:
-        print(f"\n[ERROR] 보고서 생성 실패 (exit code: {rc})")
-        sys.exit(rc)
+    # Step 4: 투자검토보고서 생성
+    if gen_investment:
+        step += 1
+        gen_report_path = ANALYZER_ROOT / "scripts" / "gen_report.py"
+        report_args = [
+            sys.executable,
+            str(gen_report_path),
+            "--company", company,
+            "--codes", str(codes_path),
+        ]
+        rc = run_step(f"Step {step}/{total_steps}: 투자검토보고서 생성", report_args, ANALYZER_ROOT)
+        if rc != 0:
+            print(f"\n[ERROR] 투자검토보고서 생성 실패 (exit code: {rc})")
+            sys.exit(rc)
+
+    # Step 5: 투심위보고서 생성
+    if gen_ic:
+        step += 1
+        ic_args = [
+            sys.executable,
+            "-m", "scripts.batch_ic_report",
+            "--company", company,
+        ]
+        if args.no_web:
+            ic_args.append("--no-web")
+        if args.no_api:
+            ic_args.append("--no-api")
+
+        rc = run_step(f"Step {step}/{total_steps}: 투심위보고서 생성", ic_args, ANALYZER_ROOT)
+        if rc != 0:
+            print(f"\n[ERROR] 투심위보고서 생성 실패 (exit code: {rc})")
+            sys.exit(rc)
 
     # 생성된 보고서를 output_dir로 복사
-    import shutil
-    import time
-    reports_dir = ANALYZER_ROOT / "reports"
-    copied = False
-    for f in sorted(reports_dir.glob(f"{company}_투자검토보고서_*.docx"), reverse=True):
-        dest = output_dir / f.name
-        for attempt in range(5):
-            try:
-                time.sleep(1)
-                shutil.copy2(f, dest)
-                print(f"\n  보고서 복사: {dest}")
-                copied = True
-                break
-            except PermissionError:
-                print(f"  파일 복사 재시도 ({attempt + 1}/5)...")
-        break
+    copied_any = False
+    if gen_investment:
+        if copy_latest_report(f"{company}_투자검토보고서_*.docx", output_dir, "투자검토보고서"):
+            copied_any = True
+    if gen_ic:
+        if copy_latest_report(f"{company}_투심위보고서_*.docx", output_dir, "투심위보고서"):
+            copied_any = True
 
-    if not copied:
+    if not copied_any:
         print(f"\n  [WARN] 생성된 보고서 파일을 찾지 못했습니다.")
 
     print(f"\n{'='*60}")

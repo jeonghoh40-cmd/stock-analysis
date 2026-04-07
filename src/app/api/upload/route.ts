@@ -13,6 +13,13 @@ export async function POST(request: NextRequest) {
   }
 
   const uploadDir = path.join(UPLOAD_ROOT, company)
+
+  // 기존 업로드 파일 정리 후 새로 생성
+  try {
+    await fs.rm(uploadDir, { recursive: true, force: true })
+  } catch {
+    // 디렉토리가 없으면 무시
+  }
   await fs.mkdir(uploadDir, { recursive: true })
 
   const files = formData.getAll("files") as File[]

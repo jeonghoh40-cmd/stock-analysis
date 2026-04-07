@@ -2,7 +2,7 @@ import { NextRequest } from "next/server"
 import path from "path"
 
 export async function POST(request: NextRequest) {
-  const { company, irDir, outputDir, options } = await request.json()
+  const { company, irDir, outputDir, reportType, options } = await request.json()
 
   if (!company || !irDir || !outputDir) {
     return Response.json(
@@ -24,6 +24,7 @@ export async function POST(request: NextRequest) {
     outputDir,
   ]
 
+  if (reportType) args.push("--report-type", reportType)
   if (options?.noWeb) args.push("--no-web")
   if (options?.noApi) args.push("--no-api")
 

@@ -33,6 +33,9 @@ export default function RunPage() {
   const [irBrowseOpen, setIrBrowseOpen] = useState(false)
   const [outputBrowseOpen, setOutputBrowseOpen] = useState(false)
 
+  // 보고서 유형
+  const [reportType, setReportType] = useState<"investment" | "ic">("investment")
+
   // 옵션
   const [noWeb, setNoWeb] = useState(false)
   const [noApi, setNoApi] = useState(false)
@@ -63,10 +66,10 @@ export default function RunPage() {
         const res = await fetch("/api/upload", { method: "POST", body: formData })
         const data = await res.json()
         if (res.ok) {
-          setUploadedFiles((prev) => [...prev, ...data.files])
+          setUploadedFiles(data.files)
           setUploadDir(data.uploadDir)
-          // 업로드하면 자동으로 업로드 경로를 IR 경로로 설정
-          if (!irDir) setIrDir(data.uploadDir)
+          // 업로드하면 항상 업로드 경로를 IR 경로로 설정
+          setIrDir(data.uploadDir)
         }
       } catch (err) {
         console.error("업로드 실패:", err)
@@ -75,7 +78,7 @@ export default function RunPage() {
         if (fileInputRef.current) fileInputRef.current.value = ""
       }
     },
-    [company, irDir]
+    [company]
   )
 
   // 분석 실행
@@ -98,6 +101,7 @@ export default function RunPage() {
           company: company.trim(),
           irDir: effectiveIrDir,
           outputDir: effectiveOutputDir,
+          reportType,
           options: { noWeb, noApi },
         }),
       })
@@ -184,7 +188,7 @@ export default function RunPage() {
         투자 분석 실행
       </h1>
       <p className="mb-8 text-sm text-zinc-500">
-        IR 자료를 기반으로 투자검토보고서를 생성합니다.
+        IR 자료를 기반으로 투자검토보고서 및 투심위보고서를 생성합니다.
       </p>
 
       <div className="space-y-6 rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
@@ -196,7 +200,13 @@ export default function RunPage() {
           <input
             type="text"
             value={company}
-            onChange={(e) => setCompany(e.target.value)}
+            onChange={(e) => {
+              setCompany(e.target.value)
+              // 기업명 변경 시 이전 업로드 상태 초기화
+              setUploadedFiles([])
+              setUploadDir("")
+              setIrDir("")
+            }}
             placeholder="예: Pixxel"
             disabled={running}
             className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
@@ -359,6 +369,46 @@ export default function RunPage() {
           </p>
         </div>
 
+        {/* ─── 보고서 유형 ─── */}
+        <div>
+          <label className="mb-2 block text-sm font-medium text-zinc-700 dark:text-zinc-300">
+            보고서 유형 <span className="text-red-500">*</span>
+          </label>
+          <div className="grid grid-cols-2 gap-3">
+            {([
+              { value: "investment" as const, label: "투자검토보고서", desc: "Gate1 스크리닝 기반 검토 보고서" },
+              { value: "ic" as const, label: "투심위보고서", desc: "투자심의위원회 10-Part 보고서" },
+            ]).map((opt) => (
+              <label
+                key={opt.value}
+                className={`flex cursor-pointer flex-col rounded-lg border-2 p-3 transition-colors ${
+                  reportType === opt.value
+                    ? "border-blue-500 bg-blue-50 dark:border-blue-400 dark:bg-blue-950/30"
+                    : "border-zinc-200 hover:border-zinc-300 dark:border-zinc-700 dark:hover:border-zinc-600"
+                } ${running ? "pointer-events-none opacity-50" : ""}`}
+              >
+                <input
+                  type="radio"
+                  name="reportType"
+                  value={opt.value}
+                  checked={reportType === opt.value}
+                  onChange={() => setReportType(opt.value)}
+                  disabled={running}
+                  className="sr-only"
+                />
+                <span className={`text-sm font-medium ${
+                  reportType === opt.value
+                    ? "text-blue-700 dark:text-blue-300"
+                    : "text-zinc-700 dark:text-zinc-300"
+                }`}>
+                  {opt.label}
+                </span>
+                <span className="mt-0.5 text-xs text-zinc-400">{opt.desc}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+
         {/* ─── 옵션 ─── */}
         <div>
           <label className="mb-2 block text-sm font-medium text-zinc-700 dark:text-zinc-300">
@@ -408,7 +458,9 @@ export default function RunPage() {
                 <path strokeLinecap="round" strokeLinejoin="round" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
                 <path strokeLinecap="round" strokeLinejoin="round" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
-              분석 실행
+              {reportType === "investment"
+                ? "투자검토보고서 생성"
+                : "투심위보고서 생성"}
             </>
           )}
         </button>
