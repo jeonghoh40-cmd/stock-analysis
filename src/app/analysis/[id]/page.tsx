@@ -15,7 +15,6 @@ import { RedteamPanel } from "@/components/dashboard/redteam-panel"
 import { BenchmarkPanel } from "@/components/dashboard/benchmark-panel"
 import { ICOpinions } from "@/components/dashboard/ic-opinions"
 import { ConfidencePanel } from "@/components/dashboard/confidence-panel"
-import { PersonaPanel } from "@/components/dashboard/persona-panel"
 import { ReportViewer } from "@/components/reports/report-viewer"
 import { ReportDownload } from "@/components/reports/report-download"
 import type { AnalysisHistory } from "@/lib/types"
@@ -105,7 +104,6 @@ export default function AnalysisDetailPage({
                     avgConfidence={result.scoring.avg_confidence}
                   />
                 </div>
-                <PersonaPanel />
               </div>
             )
           }

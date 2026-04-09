@@ -1,6 +1,8 @@
 import type {
   CompanyCodes,
   FullAnalysisResponse,
+  MonitoringAlert,
+  PortfolioCompany,
   SimilarResponse,
   UploadExtractResponse,
 } from "./types"
@@ -14,30 +16,40 @@ function headers(): Record<string, string> {
   return h
 }
 
-function authHeaders(): Record<string, string> {
-  const h: Record<string, string> = {}
-  if (API_KEY) h["X-API-Key"] = API_KEY
-  return h
-}
-
-async function post<T>(path: string, body: unknown): Promise<T> {
+async function post<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",
     headers: headers(),
     body: JSON.stringify(body),
+    signal,
   })
   if (!res.ok) {
-    throw new Error(`API error: ${res.status} ${res.statusText}`)
+    let detail = res.statusText
+    try {
+      const errorBody = await res.json()
+      detail = errorBody?.detail || errorBody?.error || detail
+    } catch {
+      // body가 JSON이 아니면 statusText 그대로 사용
+    }
+    throw new Error(`API error: ${res.status} ${detail}`)
   }
   return res.json()
 }
 
-async function get<T>(path: string): Promise<T> {
+async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     headers: headers(),
+    signal,
   })
   if (!res.ok) {
-    throw new Error(`API error: ${res.status} ${res.statusText}`)
+    let detail = res.statusText
+    try {
+      const errorBody = await res.json()
+      detail = errorBody?.detail || errorBody?.error || detail
+    } catch {
+      // body가 JSON이 아니면 statusText 그대로 사용
+    }
+    throw new Error(`API error: ${res.status} ${detail}`)
   }
   return res.json()
 }
@@ -47,15 +59,17 @@ async function get<T>(path: string): Promise<T> {
 // ---------------------------------------------------------------------------
 
 export async function analyzeCompany(
-  codes: CompanyCodes
+  codes: CompanyCodes,
+  signal?: AbortSignal
 ): Promise<FullAnalysisResponse> {
-  return post("/api/v1/analysis/full", codes)
+  return post("/api/v1/analysis/full", codes, signal)
 }
 
 export async function searchSimilarCases(
-  codes: CompanyCodes
+  codes: CompanyCodes,
+  signal?: AbortSignal
 ): Promise<SimilarResponse> {
-  return post("/api/v1/analysis/similar", codes)
+  return post("/api/v1/analysis/similar", codes, signal)
 }
 
 // ---------------------------------------------------------------------------
@@ -64,7 +78,8 @@ export async function searchSimilarCases(
 
 export function uploadAndExtract(
   files: File[],
-  onProgress?: (percent: number) => void
+  onProgress?: (percent: number) => void,
+  signal?: AbortSignal
 ): Promise<UploadExtractResponse> {
   return new Promise((resolve, reject) => {
     const formData = new FormData()
@@ -92,6 +107,17 @@ export function uploadAndExtract(
     }
 
     xhr.onerror = () => reject(new Error("Upload failed: network error"))
+    xhr.onabort = () => reject(new DOMException("Upload aborted", "AbortError"))
+
+    if (signal) {
+      if (signal.aborted) {
+        xhr.abort()
+        reject(new DOMException("Upload aborted", "AbortError"))
+        return
+      }
+      signal.addEventListener("abort", () => xhr.abort(), { once: true })
+    }
+
     xhr.send(formData)
   })
 }
@@ -100,16 +126,16 @@ export function uploadAndExtract(
 // Monitoring
 // ---------------------------------------------------------------------------
 
-export async function getPortfolio(): Promise<unknown> {
-  return get("/api/v1/monitoring/portfolio")
+export async function getPortfolio(signal?: AbortSignal): Promise<PortfolioCompany[]> {
+  return get("/api/v1/monitoring/portfolio", signal)
 }
 
-export async function getAlerts(): Promise<unknown> {
-  return get("/api/v1/monitoring/alerts")
+export async function getAlerts(signal?: AbortSignal): Promise<MonitoringAlert[]> {
+  return get("/api/v1/monitoring/alerts", signal)
 }
 
-export async function getCompanyDetail(company: string): Promise<unknown> {
-  return get(`/api/v1/monitoring/${encodeURIComponent(company)}/detail`)
+export async function getCompanyDetail(company: string, signal?: AbortSignal): Promise<unknown> {
+  return get(`/api/v1/monitoring/${encodeURIComponent(company)}/detail`, signal)
 }
 
 // ---------------------------------------------------------------------------

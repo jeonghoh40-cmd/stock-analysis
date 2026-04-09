@@ -49,7 +49,41 @@ async function getRoots(): Promise<EntryInfo[]> {
   return roots
 }
 
+// 파일 탐색 기능 활성화 여부 (환경변수로 명시적 허용 필요)
+const BROWSE_ENABLED = process.env.ENABLE_FILE_BROWSE === "true"
+
+// 로컬(서버PC) 접속인지 확인 — 외부 접속자는 서버 파일시스템 탐색 차단
+// 주의: x-forwarded-for/x-real-ip 헤더는 클라이언트가 위조할 수 있으므로
+// 반드시 ENABLE_FILE_BROWSE 환경변수와 함께 사용해야 함
+function isLocalRequest(request: NextRequest): boolean {
+  // 환경변수로 기능이 명시적으로 활성화되지 않으면 차단
+  if (!BROWSE_ENABLED) return false
+
+  const forwarded = request.headers.get("x-forwarded-for")
+  const realIp = request.headers.get("x-real-ip")
+  const ip = forwarded?.split(",")[0]?.trim() || realIp || ""
+
+  const localIps = ["127.0.0.1", "::1", "localhost", "0.0.0.0"]
+  if (localIps.includes(ip) || ip === "") return true
+
+  // 사내 네트워크 대역 (192.168.x.x, 10.x.x.x, 172.16~31.x.x)
+  if (ip.startsWith("192.168.") || ip.startsWith("10.")) return true
+  if (ip.startsWith("172.")) {
+    const second = parseInt(ip.split(".")[1] || "0", 10)
+    if (second >= 16 && second <= 31) return true
+  }
+
+  return false
+}
+
 export async function POST(request: NextRequest) {
+  if (!isLocalRequest(request)) {
+    return Response.json(
+      { error: "서버 파일 탐색은 사내 네트워크에서만 가능합니다. 파일 업로드를 이용해주세요." },
+      { status: 403 }
+    )
+  }
+
   const { dirPath } = await request.json()
 
   if (!dirPath) {

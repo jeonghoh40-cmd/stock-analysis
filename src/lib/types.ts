@@ -173,6 +173,23 @@ export interface AnalysisHistory {
   result: FullAnalysisResponse
 }
 
+// Monitoring
+export interface PortfolioCompany {
+  name: string
+  investment_date: string
+  score: number
+  score_delta: number
+  status: string
+  alert_count: number
+}
+
+export interface MonitoringAlert {
+  company: string
+  severity: string
+  message: string
+  timestamp: string
+}
+
 // File upload
 export interface ExtractedFile {
   filename: string

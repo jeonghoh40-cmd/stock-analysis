@@ -1,49 +1,37 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { Card, CardTitle } from "@/components/ui/card"
+import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Spinner } from "@/components/ui/spinner"
 import { getPortfolio, getAlerts } from "@/lib/api"
-
-interface PortfolioCompany {
-  name: string
-  investment_date: string
-  score: number
-  score_delta: number
-  status: string
-  alert_count: number
-}
-
-interface Alert {
-  company: string
-  severity: string
-  message: string
-  timestamp: string
-}
+import type { PortfolioCompany, MonitoringAlert } from "@/lib/types"
 
 export default function MonitoringPage() {
   const [companies, setCompanies] = useState<PortfolioCompany[]>([])
-  const [alerts, setAlerts] = useState<Alert[]>([])
+  const [alerts, setAlerts] = useState<MonitoringAlert[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
+    const controller = new AbortController()
     async function load() {
       try {
         const [portfolio, alertData] = await Promise.all([
-          getPortfolio(),
-          getAlerts(),
+          getPortfolio(controller.signal),
+          getAlerts(controller.signal),
         ])
-        setCompanies(portfolio as PortfolioCompany[])
-        setAlerts(alertData as Alert[])
-      } catch {
+        setCompanies(portfolio)
+        setAlerts(alertData)
+      } catch (err) {
+        if ((err as Error).name === "AbortError") return
         setError("모니터링 데이터를 불러올 수 없습니다. 백엔드 서버를 확인해 주세요.")
       } finally {
         setLoading(false)
       }
     }
     load()
+    return () => controller.abort()
   }, [])
 
   function severityVariant(severity: string) {

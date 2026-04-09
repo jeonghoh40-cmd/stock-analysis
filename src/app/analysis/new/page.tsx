@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import FileUploadZone from "@/components/analysis/file-upload-zone"
 import AnalysisForm from "@/components/analysis/analysis-form"
@@ -24,6 +24,11 @@ export default function NewAnalysisPage() {
   const [codes, setCodes] = useState<CompanyCodes | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const abortRef = useRef<AbortController | null>(null)
+
+  useEffect(() => {
+    return () => abortRef.current?.abort()
+  }, [])
 
   function handleExtracted(combinedText: string, files: ExtractedFile[]) {
     setExtractedText(combinedText)
@@ -40,12 +45,16 @@ export default function NewAnalysisPage() {
     setLoading(true)
     setError(null)
 
+    const controller = new AbortController()
+    abortRef.current = controller
+
     try {
-      const result = await analyzeCompany(codes)
+      const result = await analyzeCompany(codes, controller.signal)
       const id = generateId()
       await saveAnalysis(id, codes.company_name, codes, result)
       router.push(`/analysis/${id}`)
     } catch (err) {
+      if ((err as Error).name === "AbortError") return
       setError(err instanceof Error ? err.message : "분석 중 오류가 발생했습니다.")
       setLoading(false)
     }

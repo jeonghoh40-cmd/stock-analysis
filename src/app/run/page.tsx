@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useRef, useCallback } from "react"
+import { useState, useRef, useCallback, useEffect } from "react"
 import FileBrowser from "@/components/ui/file-browser"
 
 type LogEntry = {
@@ -25,13 +25,8 @@ export default function RunPage() {
   const [uploadDir, setUploadDir] = useState("")
   const [uploading, setUploading] = useState(false)
 
-  // 리포트 저장
-  const [outputDir, setOutputDir] = useState("")
-  const serverOutputDir = process.env.NEXT_PUBLIC_DEFAULT_OUTPUT || ""
-
-  // 파일 탐색기
+  // 파일 탐색기 (사내 네트워크 전용)
   const [irBrowseOpen, setIrBrowseOpen] = useState(false)
-  const [outputBrowseOpen, setOutputBrowseOpen] = useState(false)
 
   // 보고서 유형
   const [reportType, setReportType] = useState<"investment" | "ic">("investment")
@@ -47,6 +42,12 @@ export default function RunPage() {
   const [reportFiles, setReportFiles] = useState<ReportFile[]>([])
   const logEndRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const runAbortRef = useRef<AbortController | null>(null)
+
+  // 페이지 unmount 시 진행 중인 SSE 스트림/업로드 중단
+  useEffect(() => {
+    return () => runAbortRef.current?.abort()
+  }, [])
 
   const scrollToBottom = () => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -68,7 +69,6 @@ export default function RunPage() {
         if (res.ok) {
           setUploadedFiles(data.files)
           setUploadDir(data.uploadDir)
-          // 업로드하면 항상 업로드 경로를 IR 경로로 설정
           setIrDir(data.uploadDir)
         }
       } catch (err) {
@@ -84,14 +84,16 @@ export default function RunPage() {
   // 분석 실행
   const handleRun = async () => {
     const effectiveIrDir = irDir.trim() || uploadDir
-    const effectiveOutputDir = outputDir.trim() || serverOutputDir
 
-    if (!company.trim() || !effectiveIrDir || !effectiveOutputDir) return
+    if (!company.trim() || !effectiveIrDir) return
 
     setRunning(true)
     setLogs([])
     setDone(null)
     setReportFiles([])
+
+    const controller = new AbortController()
+    runAbortRef.current = controller
 
     try {
       const res = await fetch("/api/run", {
@@ -100,10 +102,10 @@ export default function RunPage() {
         body: JSON.stringify({
           company: company.trim(),
           irDir: effectiveIrDir,
-          outputDir: effectiveOutputDir,
           reportType,
           options: { noWeb, noApi },
         }),
+        signal: controller.signal,
       })
 
       if (!res.ok) {
@@ -139,7 +141,7 @@ export default function RunPage() {
             if (entry.type === "done") {
               setDone(entry.exitCode === 0)
               if (entry.exitCode === 0) {
-                loadReportFiles(effectiveOutputDir)
+                loadReportFiles()
               }
             }
             setTimeout(scrollToBottom, 50)
@@ -149,21 +151,26 @@ export default function RunPage() {
         }
       }
     } catch (err) {
-      setLogs((prev) => [
-        ...prev,
-        { type: "error", message: `네트워크 오류: ${err}` },
-      ])
+      if ((err as Error).name === "AbortError") {
+        setLogs((prev) => [...prev, { type: "info", message: "사용자가 중단했습니다." }])
+      } else {
+        setLogs((prev) => [
+          ...prev,
+          { type: "error", message: `네트워크 오류: ${err}` },
+        ])
+      }
     } finally {
       setRunning(false)
+      runAbortRef.current = null
     }
   }
 
-  const loadReportFiles = async (dir: string) => {
+  const loadReportFiles = async () => {
     try {
       const res = await fetch("/api/download", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ directory: dir }),
+        body: JSON.stringify({ company: company.trim(), reportType }),
       })
       const data = await res.json()
       if (data.files) setReportFiles(data.files)
@@ -179,8 +186,7 @@ export default function RunPage() {
   }
 
   const isSourceReady = irDir.trim().length > 0 || uploadedFiles.length > 0
-  const isOutputReady = outputDir.trim().length > 0
-  const isValid = company.trim() && isSourceReady && isOutputReady
+  const isValid = company.trim() && isSourceReady
 
   return (
     <div className="mx-auto w-full max-w-3xl">
@@ -188,7 +194,7 @@ export default function RunPage() {
         투자 분석 실행
       </h1>
       <p className="mb-8 text-sm text-zinc-500">
-        IR 자료를 기반으로 투자검토보고서 및 투심위보고서를 생성합니다.
+        IR/IM 자료를 업로드하면 보고서를 생성하여 다운로드할 수 있습니다.
       </p>
 
       <div className="space-y-6 rounded-lg border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
@@ -202,7 +208,6 @@ export default function RunPage() {
             value={company}
             onChange={(e) => {
               setCompany(e.target.value)
-              // 기업명 변경 시 이전 업로드 상태 초기화
               setUploadedFiles([])
               setUploadDir("")
               setIrDir("")
@@ -213,160 +218,118 @@ export default function RunPage() {
           />
         </div>
 
-        {/* ─── IR 자료 소스 ─── */}
+        {/* ─── IR/IM 자료 ─── */}
         <div>
           <label className="mb-1.5 block text-sm font-medium text-zinc-700 dark:text-zinc-300">
-            IR 자료 소스 <span className="text-red-500">*</span>
+            IR/IM 자료 <span className="text-red-500">*</span>
           </label>
 
-          {/* 탐색기로 선택 */}
-          <div className="flex gap-2">
-            <div
-              className={`flex flex-1 items-center rounded-md border px-3 py-2 ${
-                irDir
-                  ? "border-zinc-300 dark:border-zinc-700"
-                  : "border-dashed border-zinc-300 dark:border-zinc-700"
-              } bg-white dark:bg-zinc-800`}
-            >
-              {irDir ? (
-                <div className="flex flex-1 items-center justify-between">
-                  <span className="truncate font-mono text-sm text-zinc-900 dark:text-zinc-100">
-                    {irDir}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => { setIrDir(""); setUploadedFiles([]); setUploadDir("") }}
-                    className="ml-2 shrink-0 text-zinc-400 hover:text-zinc-600"
-                  >
-                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  </button>
-                </div>
-              ) : (
-                <span className="text-sm text-zinc-400">탐색기로 폴더를 선택하거나 아래에서 파일을 업로드하세요</span>
-              )}
-            </div>
-            <button
-              type="button"
-              onClick={() => setIrBrowseOpen(true)}
-              disabled={running}
-              className="flex shrink-0 items-center gap-1.5 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700"
-            >
-              <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 20 20">
-                <path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" />
-              </svg>
-              찾아보기
-            </button>
-          </div>
-
-          {/* 또는 파일 업로드 */}
-          <div className="mt-3">
-            <div
-              onClick={() => !running && company.trim() && fileInputRef.current?.click()}
-              onDragOver={(e) => { e.preventDefault(); e.stopPropagation() }}
-              onDrop={(e) => {
-                e.preventDefault(); e.stopPropagation()
-                if (!running && company.trim()) handleFileUpload(e.dataTransfer.files)
-              }}
-              className={`flex min-h-[72px] cursor-pointer flex-col items-center justify-center rounded-md border-2 border-dashed transition-colors ${
-                !company.trim()
-                  ? "border-zinc-200 bg-zinc-50 opacity-50 dark:border-zinc-800 dark:bg-zinc-900"
+          {/* 파일 업로드 영역 */}
+          <div
+            onClick={() => !running && company.trim() && fileInputRef.current?.click()}
+            onDragOver={(e) => { e.preventDefault(); e.stopPropagation() }}
+            onDrop={(e) => {
+              e.preventDefault(); e.stopPropagation()
+              if (!running && company.trim()) handleFileUpload(e.dataTransfer.files)
+            }}
+            className={`flex min-h-[80px] cursor-pointer flex-col items-center justify-center rounded-md border-2 border-dashed transition-colors ${
+              !company.trim()
+                ? "border-zinc-200 bg-zinc-50 opacity-50 dark:border-zinc-800 dark:bg-zinc-900"
+                : uploadedFiles.length > 0
+                  ? "border-green-300 bg-green-50/50 hover:border-green-400 dark:border-green-700 dark:bg-green-900/20"
                   : "border-zinc-300 bg-zinc-50 hover:border-blue-400 dark:border-zinc-700 dark:bg-zinc-800/50"
-              }`}
-            >
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                accept=".pdf,.pptx,.ppt,.xlsx,.xls,.docx,.doc,.hwp,.hwpx,.txt,.md"
-                onChange={(e) => handleFileUpload(e.target.files)}
-                className="hidden"
-              />
-              {uploading ? (
-                <div className="flex items-center gap-2 text-sm text-zinc-500">
-                  <svg className="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                  </svg>
-                  업로드 중...
-                </div>
-              ) : (
+            }`}
+          >
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept=".pdf,.pptx,.ppt,.xlsx,.xls,.docx,.doc,.hwp,.hwpx,.txt,.md"
+              onChange={(e) => handleFileUpload(e.target.files)}
+              className="hidden"
+            />
+            {uploading ? (
+              <div className="flex items-center gap-2 text-sm text-zinc-500">
+                <svg className="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                </svg>
+                업로드 중...
+              </div>
+            ) : (
+              <>
+                <svg className="mb-1 h-6 w-6 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+                </svg>
                 <p className="text-sm text-zinc-500">
                   {company.trim()
-                    ? "또는 여기를 클릭/드래그하여 PC에서 직접 업로드 (PDF, PPT, Excel, Word, HWP)"
+                    ? "클릭하거나 파일을 드래그하여 업로드 (PDF, PPT, Excel, Word, HWP)"
                     : "기업명을 먼저 입력하세요"}
                 </p>
-              )}
-            </div>
-
-            {uploadedFiles.length > 0 && (
-              <div className="mt-2 space-y-1">
-                {uploadedFiles.map((name, i) => (
-                  <div
-                    key={i}
-                    className="flex items-center gap-2 rounded bg-zinc-100 px-2.5 py-1.5 text-xs text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
-                  >
-                    <svg className="h-3.5 w-3.5 shrink-0 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                    </svg>
-                    {name}
-                  </div>
-                ))}
-              </div>
+              </>
             )}
           </div>
-        </div>
 
-        {/* ─── 리포트 저장 ─── */}
-        <div>
-          <label className="mb-1.5 block text-sm font-medium text-zinc-700 dark:text-zinc-300">
-            리포트 저장 위치 <span className="text-red-500">*</span>
-          </label>
-
-          {/* 탐색기로 선택 */}
-          <div className="flex gap-2">
-            <div
-              className={`flex flex-1 items-center rounded-md border px-3 py-2 ${
-                outputDir
-                  ? "border-zinc-300 dark:border-zinc-700"
-                  : "border-dashed border-zinc-300 dark:border-zinc-700"
-              } bg-white dark:bg-zinc-800`}
-            >
-              {outputDir ? (
-                <div className="flex flex-1 items-center justify-between">
-                  <span className="truncate font-mono text-sm text-zinc-900 dark:text-zinc-100">
-                    {outputDir}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setOutputDir("")}
-                    className="ml-2 shrink-0 text-zinc-400 hover:text-zinc-600"
-                  >
-                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  </button>
+          {/* 업로드된 파일 목록 */}
+          {uploadedFiles.length > 0 && (
+            <div className="mt-2 space-y-1">
+              {uploadedFiles.map((name, i) => (
+                <div
+                  key={i}
+                  className="flex items-center gap-2 rounded bg-zinc-100 px-2.5 py-1.5 text-xs text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
+                >
+                  <svg className="h-3.5 w-3.5 shrink-0 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                  </svg>
+                  {name}
                 </div>
-              ) : (
-                <span className="text-sm text-zinc-400">탐색기로 저장 폴더를 선택하세요</span>
-              )}
+              ))}
+              <button
+                type="button"
+                onClick={() => { setUploadedFiles([]); setUploadDir(""); setIrDir("") }}
+                className="mt-1 text-xs text-zinc-400 hover:text-red-500"
+              >
+                파일 초기화
+              </button>
             </div>
-            <button
-              type="button"
-              onClick={() => setOutputBrowseOpen(true)}
-              disabled={running}
-              className="flex shrink-0 items-center gap-1.5 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700"
-            >
-              <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 20 20">
+          )}
+
+          {/* 사내 네트워크용 찾아보기 (서버 디렉토리) */}
+          {!uploadedFiles.length && (
+            <div className="mt-2 flex items-center gap-2">
+              <span className="text-xs text-zinc-400">또는</span>
+              <button
+                type="button"
+                onClick={() => setIrBrowseOpen(true)}
+                disabled={running}
+                className="flex items-center gap-1 text-xs text-blue-500 hover:text-blue-700 disabled:opacity-50"
+              >
+                <svg className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 20 20">
+                  <path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" />
+                </svg>
+                서버/네트워크 폴더에서 선택 (사내 전용)
+              </button>
+            </div>
+          )}
+
+          {/* irDir이 설정되었지만 업로드가 아닌 경우 (찾아보기로 선택) */}
+          {irDir && !uploadedFiles.length && (
+            <div className="mt-2 flex items-center gap-2 rounded bg-zinc-100 px-2.5 py-1.5 text-xs text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
+              <svg className="h-3.5 w-3.5 shrink-0 text-blue-500" fill="currentColor" viewBox="0 0 20 20">
                 <path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" />
               </svg>
-              찾아보기
-            </button>
-          </div>
-          <p className="mt-1 text-xs text-zinc-400">
-            생성된 Word 보고서(.docx)가 저장될 폴더
-          </p>
+              <span className="flex-1 truncate font-mono">{irDir}</span>
+              <button
+                type="button"
+                onClick={() => setIrDir("")}
+                className="shrink-0 text-zinc-400 hover:text-red-500"
+              >
+                <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+          )}
         </div>
 
         {/* ─── 보고서 유형 ─── */}
@@ -377,7 +340,7 @@ export default function RunPage() {
           <div className="grid grid-cols-2 gap-3">
             {([
               { value: "investment" as const, label: "투자검토보고서", desc: "Gate1 스크리닝 기반 검토 보고서" },
-              { value: "ic" as const, label: "투심위보고서", desc: "투자심의위원회 10-Part 보고서" },
+              { value: "ic" as const, label: "투심위보고서", desc: "투자심의위원회 보고서" },
             ]).map((opt) => (
               <label
                 key={opt.value}
@@ -507,11 +470,11 @@ export default function RunPage() {
         </div>
       )}
 
-      {/* ─── 리포트 다운로드 ─── */}
+      {/* ─── 보고서 다운로드 ─── */}
       {reportFiles.length > 0 && (
         <div className="mt-6">
           <h2 className="mb-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
-            생성된 리포트
+            생성된 보고서 — 클릭하여 내 PC에 저장
           </h2>
           <div className="space-y-2">
             {reportFiles.map((file) => (
@@ -523,7 +486,7 @@ export default function RunPage() {
               >
                 <div className="flex items-center gap-3">
                   <svg className="h-5 w-5 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m.75 12l3 3m0 0l3-3m-3 3v-6m-1.5-9H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
                   </svg>
                   <div>
                     <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
@@ -535,7 +498,7 @@ export default function RunPage() {
                   </div>
                 </div>
                 <span className="text-xs font-medium text-blue-600 dark:text-blue-400">
-                  다운로드
+                  내 PC에 저장
                 </span>
               </a>
             ))}
@@ -543,20 +506,13 @@ export default function RunPage() {
         </div>
       )}
 
-      {/* ─── 파일 탐색기 모달 ─── */}
+      {/* ─── 파일 탐색기 모달 (사내 전용) ─── */}
       <FileBrowser
         open={irBrowseOpen}
         onClose={() => setIrBrowseOpen(false)}
-        onSelect={(path) => setIrDir(path)}
+        onSelect={(path) => { setIrDir(path); setUploadedFiles([]) }}
         mode="directory"
-        title="IR 자료 폴더 선택"
-      />
-      <FileBrowser
-        open={outputBrowseOpen}
-        onClose={() => setOutputBrowseOpen(false)}
-        onSelect={(path) => setOutputDir(path)}
-        mode="directory"
-        title="리포트 저장 폴더 선택"
+        title="서버/네트워크 폴더 선택 (사내 전용)"
       />
     </div>
   )

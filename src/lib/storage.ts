@@ -5,10 +5,11 @@ const CRYPTO_KEY_NAME = "vc_crypto_key"
 
 // ---------------------------------------------------------------------------
 // AES-GCM 암호화 (Web Crypto API)
+// 키를 localStorage에 저장하여 탭/브라우저 종료 후에도 데이터 복호화 가능
 // ---------------------------------------------------------------------------
 
 async function getOrCreateKey(): Promise<CryptoKey> {
-  const stored = sessionStorage.getItem(CRYPTO_KEY_NAME)
+  const stored = localStorage.getItem(CRYPTO_KEY_NAME)
   if (stored) {
     const raw = Uint8Array.from(atob(stored), (c) => c.charCodeAt(0))
     return crypto.subtle.importKey("raw", raw, "AES-GCM", true, [
@@ -22,7 +23,7 @@ async function getOrCreateKey(): Promise<CryptoKey> {
     ["encrypt", "decrypt"]
   )
   const exported = await crypto.subtle.exportKey("raw", key)
-  sessionStorage.setItem(
+  localStorage.setItem(
     CRYPTO_KEY_NAME,
     btoa(String.fromCharCode(...new Uint8Array(exported)))
   )
@@ -111,5 +112,5 @@ export async function deleteAnalysis(id: string): Promise<void> {
 
 export function clearAllAnalyses(): void {
   localStorage.removeItem(STORAGE_KEY)
-  sessionStorage.removeItem(CRYPTO_KEY_NAME)
+  localStorage.removeItem(CRYPTO_KEY_NAME)
 }

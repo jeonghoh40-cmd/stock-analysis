@@ -1,0 +1,132 @@
+{
+  "_comment": "VC 분류 코드 단일 소스. constants.ts(프론트)와 run_analysis.py(Python 스크립트) 양쪽에서 import.",
+  "sector": {
+    "multiple": true,
+    "default": [],
+    "options": [
+      { "value": "SW", "label": "SW/SaaS" },
+      { "value": "DEEPTECH", "label": "딥테크" },
+      { "value": "BIO", "label": "바이오" },
+      { "value": "HEALTHCARE", "label": "헬스케어" },
+      { "value": "COMMERCE", "label": "커머스" },
+      { "value": "FOOD", "label": "푸드테크" },
+      { "value": "PLATFORM", "label": "플랫폼" },
+      { "value": "LOGISTICS", "label": "물류" },
+      { "value": "O2O", "label": "O2O" },
+      { "value": "CONTENT", "label": "콘텐츠" },
+      { "value": "AI", "label": "AI" },
+      { "value": "FINTECH", "label": "핀테크" },
+      { "value": "ENERGY", "label": "에너지" },
+      { "value": "MANUFACTURING", "label": "제조" },
+      { "value": "GLOBAL", "label": "글로벌" },
+      { "value": "ENTERTAINMENT", "label": "엔터테인먼트" },
+      { "value": "SECURITY", "label": "보안" },
+      { "value": "MOBILITY", "label": "모빌리티" },
+      { "value": "AGRITECH", "label": "애그테크" },
+      { "value": "PROPTECH", "label": "프롭테크" },
+      { "value": "EDTECH", "label": "에듀테크" },
+      { "value": "GAMING", "label": "게이밍" },
+      { "value": "HARDWARE", "label": "하드웨어" }
+    ]
+  },
+  "era": {
+    "default": "ERA_AI",
+    "options": [
+      { "value": "ERA_08", "label": "2008~2012 (금융위기 이후 회복기)" },
+      { "value": "ERA_15", "label": "2013~2019 (안정 성장기)" },
+      { "value": "ERA_COVID", "label": "2020~2021 (코로나 특수)" },
+      { "value": "ERA_RATE_HIKE", "label": "2022~2023 (금리 인상기)" },
+      { "value": "ERA_AI", "label": "2024~현재 (AI 투자 붐)" }
+    ]
+  },
+  "stage": {
+    "default": "UNKNOWN",
+    "options": [
+      { "value": "Seed/Pre-A", "label": "Seed / Pre-A" },
+      { "value": "Series-A", "label": "Series A" },
+      { "value": "Series-B", "label": "Series B" },
+      { "value": "Series-C+", "label": "Series C+" },
+      { "value": "Pre-IPO", "label": "Pre-IPO" },
+      { "value": "Growth", "label": "Growth" }
+    ]
+  },
+  "founder_grade": {
+    "default": "FOUNDER_UNKNOWN",
+    "options": [
+      { "value": "FOUNDER_S", "label": "S (연쇄창업 성공 + 도메인 전문가)" },
+      { "value": "FOUNDER_A", "label": "A (교수/박사 + 10년+ 도메인 전문가, 연쇄창업/임원 경력)" },
+      { "value": "FOUNDER_B", "label": "B (관련 분야 경력 보유, 일반적 수준)" },
+      { "value": "FOUNDER_C", "label": "C (경력 부족/신입)" }
+    ]
+  },
+  "market_grade": {
+    "default": "UNKNOWN",
+    "options": [
+      { "value": "MARKET_S", "label": "S (글로벌 초대형 + 고성장, TAM 1조원+)" },
+      { "value": "MARKET_A", "label": "A (대형 + 구조적 성장, 수천억+)" },
+      { "value": "MARKET_B", "label": "B (수백억 규모 또는 니치)" },
+      { "value": "MARKET_C", "label": "C (소형/정체)" }
+    ]
+  },
+  "market_position": {
+    "default": "POS_STARTUP",
+    "options": [
+      { "value": "POS_1ST", "label": "1위 (매출/점유율 1위 또는 유일)" },
+      { "value": "POS_CREATING", "label": "카테고리 창출 (신시장 개척)" },
+      { "value": "POS_CONTENDER", "label": "상위권 경쟁자" },
+      { "value": "POS_FOLLOWER", "label": "후발주자" },
+      { "value": "POS_STARTUP", "label": "초기 스타트업 (포지션 불명확)" }
+    ]
+  },
+  "global_expansion": {
+    "default": "UNKNOWN",
+    "options": [
+      { "value": "GLOBAL_BORN", "label": "Born Global (해외 매출 50% 이상)" },
+      { "value": "GLOBAL_ACTIVE", "label": "해외 사업 진행 중" },
+      { "value": "GLOBAL_READY", "label": "해외 진출 준비 완료" },
+      { "value": "GLOBAL_DOMESTIC", "label": "국내 중심" }
+    ]
+  },
+  "vc_liquidity": {
+    "default": "LIQUIDITY_NORMAL",
+    "options": [
+      { "value": "LIQUIDITY_EXCESS", "label": "과잉 유동성 (저금리)" },
+      { "value": "LIQUIDITY_NORMAL", "label": "정상적 VC 시장" },
+      { "value": "LIQUIDITY_TIGHT", "label": "유동성 경색 (긴축)" }
+    ]
+  },
+  "tech_listing": {
+    "default": "UNKNOWN",
+    "options": [
+      { "value": "TECH_LISTED", "label": "기술특례 상장 완료" },
+      { "value": "TECH_ELIGIBLE", "label": "기술특례 상장 가능성 있음" },
+      { "value": "TECH_NOT_ELIGIBLE", "label": "해당 없음" }
+    ]
+  },
+  "urgency_grade": {
+    "default": "UNKNOWN",
+    "options": [
+      { "value": "STABLE", "label": "안정 (런웨이 18개월+)" },
+      { "value": "CAUTION", "label": "주의 (런웨이 12개월+)" },
+      { "value": "WARNING", "label": "경고 (런웨이 부족)" }
+    ]
+  },
+  "ai_utilization": {
+    "default": null,
+    "options": [
+      { "value": "CORE_AI", "label": "핵심 AI (AI가 핵심 제품)" },
+      { "value": "ENHANCED", "label": "AI 활용 (AI로 제품 강화)" },
+      { "value": "WRAPPER", "label": "래퍼 (API 래핑 수준)" },
+      { "value": "NONE", "label": "미활용" }
+    ]
+  },
+  "network_effect": {
+    "default": null,
+    "options": [
+      { "value": "STRONG", "label": "강함" },
+      { "value": "MODERATE", "label": "보통" },
+      { "value": "WEAK", "label": "약함" },
+      { "value": "NONE", "label": "없음" }
+    ]
+  }
+}

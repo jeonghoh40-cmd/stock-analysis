@@ -36,18 +36,34 @@ def find_analyzer_root() -> Path:
 
 ANALYZER_ROOT = find_analyzer_root()
 
-DEFAULT_CODES = {
-    "sector": [],
-    "stage": "UNKNOWN",
-    "founder_grade": "FOUNDER_UNKNOWN",
-    "market_grade": "UNKNOWN",
-    "market_position": "POS_STARTUP",
-    "global_expansion": "UNKNOWN",
-    "era": "ERA_AI",
-    "urgency_grade": "UNKNOWN",
-    "tech_listing": "UNKNOWN",
-    "vc_liquidity": "LIQUIDITY_NORMAL",
-}
+# 분류 코드는 config/tag_schema.json에서 로드 (constants.ts와 단일 소스 공유)
+SCHEMA_PATH = Path(__file__).resolve().parent.parent / "config" / "tag_schema.json"
+
+
+def _load_default_codes() -> dict:
+    """tag_schema.json에서 기본 분류 코드를 로드한다."""
+    with open(SCHEMA_PATH, encoding="utf-8") as f:
+        schema = json.load(f)
+    return {
+        key: node.get("default")
+        for key, node in schema.items()
+        if not key.startswith("_")
+    }
+
+
+def _load_schema_options() -> dict:
+    """tag_schema.json에서 각 필드의 허용 값 목록을 로드한다 (Claude 프롬프트 생성용)."""
+    with open(SCHEMA_PATH, encoding="utf-8") as f:
+        schema = json.load(f)
+    return {
+        key: [opt["value"] for opt in node.get("options", [])]
+        for key, node in schema.items()
+        if not key.startswith("_")
+    }
+
+
+DEFAULT_CODES = _load_default_codes()
+SCHEMA_OPTIONS = _load_schema_options()
 
 
 def run_step(label: str, args: list[str], cwd: Path) -> int:
@@ -98,14 +114,14 @@ def ensure_codes_json(company: str, analysis_dir: Path) -> Path:
 판정 기준:
 - sector: 복수 선택. ["SW","DEEPTECH","BIO","HEALTHCARE","COMMERCE","FOOD","PLATFORM","LOGISTICS","O2O","CONTENT","AI","FINTECH","ENERGY","MANUFACTURING","GLOBAL","ENTERTAINMENT","SECURITY","MOBILITY","AGRITECH","PROPTECH","EDTECH","GAMING","HARDWARE"]
 - stage: IR에 명시된 투자 라운드 기준. "Seed/Pre-A"(시드~Pre-A), "Series-A", "Series-B", "Series-C+", "Pre-IPO"(상장 직전), "Growth". 명시되지 않으면 임직원수/매출 규모로 추정.
-- founder_grade: "FOUNDER_A"(교수/박사+10년 이상 도메인 전문가, 연쇄창업 성공, 글로벌 기업 임원 출신), "FOUNDER_B"(관련 분야 경력 보유, 일반적 수준), "FOUNDER_C"(경력 부족/신입). IR에서 경력이 명확히 드러나지 않으면 FOUNDER_B로 판정.
+- founder_grade: "FOUNDER_S"(연쇄창업 성공 + 도메인 전문가), "FOUNDER_A"(교수/박사+10년 이상 도메인 전문가, 글로벌 기업 임원 출신), "FOUNDER_B"(관련 분야 경력 보유, 일반적 수준), "FOUNDER_C"(경력 부족/신입). IR에서 경력이 명확히 드러나지 않으면 FOUNDER_B로 판정.
 - market_grade: "MARKET_S"(TAM 1조원+ 글로벌 메가 트렌드), "MARKET_A"(수천억 이상 구조적 성장), "MARKET_B"(수백억 규모 또는 니치), "MARKET_C"(소규모)
 - market_position: "POS_1ST"(매출/점유율 1위 또는 유일한 기업), "POS_CREATING"(기존에 없던 새로운 카테고리를 창출하는 기업. 반드시 IR에서 '최초', '신시장', '새로운 카테고리' 등이 명확해야 함), "POS_CONTENDER"(시장에 경쟁자가 있고 상위권에 위치), "POS_FOLLOWER"(후발주자), "POS_STARTUP"(아직 시장 포지션이 불명확한 초기 스타트업). 근거가 불충분하면 POS_STARTUP으로 판정.
 - global_expansion: "GLOBAL_BORN"(해외 매출 50% 이상), "GLOBAL_READY"(해외 진출 준비 완료, 구체적 계획), "GLOBAL_ACTIVE"(해외 사업 진행 중), "GLOBAL_DOMESTIC"(국내 중심, 해외 계획 불명확)
 - era: "ERA_AI" (현재 고정)
 - urgency_grade: "STABLE"(런웨이 18개월+), "CAUTION"(런웨이 12개월+), "WARNING"(런웨이 부족). 재무 정보 없으면 "CAUTION".
 - tech_listing: "TECH_LISTED"(기술특례 상장 완료), "TECH_ELIGIBLE"(기술특례 상장 가능성 있음), "TECH_NOT_ELIGIBLE"(해당 없음)
-- vc_liquidity: "LIQUIDITY_TIGHT"(VC 시장 위축기), "LIQUIDITY_NORMAL"(일반적)
+- vc_liquidity: "LIQUIDITY_EXCESS"(과잉 유동성/저금리), "LIQUIDITY_NORMAL"(일반적), "LIQUIDITY_TIGHT"(VC 시장 위축기)
 
 IR 자료:
 {ir_text}
@@ -304,7 +320,7 @@ def main():
     print(f"{'='*60}\n", flush=True)
     ensure_analysis_json(company, analysis_out, ir_dir)
 
-    # Step 4: 투자검토보고서 생성
+    # Step 5: 투자검토보고서 생성
     if gen_investment:
         step += 1
         gen_report_path = ANALYZER_ROOT / "scripts" / "gen_report.py"
@@ -325,7 +341,7 @@ def main():
             print(f"\n[ERROR] 투자검토보고서 생성 실패 (exit code: {rc})")
             sys.exit(rc)
 
-    # Step 5: 투심위보고서 생성
+    # Step 6: 투심위보고서 생성
     if gen_ic:
         step += 1
         ic_args = [
