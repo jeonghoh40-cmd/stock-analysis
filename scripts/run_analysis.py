@@ -84,7 +84,7 @@ def ensure_codes_json(company: str, analysis_dir: Path) -> Path:
         try:
             import anthropic
 
-            ir_text = ir_path.read_text(encoding="utf-8")[:10000]
+            ir_text = ir_path.read_text(encoding="utf-8")[:25000]
             client = anthropic.Anthropic()
             response = client.messages.create(
                 model="claude-sonnet-4-20250514",
@@ -256,7 +256,7 @@ def main():
     # 단계 수 계산
     gen_investment = report_type in ("investment", "both")
     gen_ic = report_type in ("ic", "both")
-    total_steps = 3 + (1 if gen_investment else 0) + (1 if gen_ic else 0)
+    total_steps = 4 + (1 if gen_investment else 0) + (1 if gen_ic else 0)
     step = 0
 
     # Step 1: IR 텍스트 추출
@@ -280,7 +280,24 @@ def main():
     print(f"{'='*60}\n", flush=True)
     codes_path = ensure_codes_json(company, analysis_out)
 
-    # Step 3: analysis.json 생성
+    # Step 3: 구조화 데이터 추출 (enriched_analysis.json)
+    step += 1
+    print(f"\n{'='*60}")
+    print(f"  [Step {step}/{total_steps}: 구조화 데이터 추출]")
+    print(f"{'='*60}\n", flush=True)
+    enriched_path = None
+    ir_text_file = analysis_out / "ir_text.md"
+    if ir_text_file.exists():
+        try:
+            sys.path.insert(0, str(ANALYZER_ROOT))
+            from src.extraction.structured_extractor import extract_and_save
+            enriched_path = extract_and_save(company, ir_text_file, analysis_out)
+        except Exception as e:
+            print(f"  [WARN] 구조화 데이터 추출 실패: {e}")
+    else:
+        print(f"  [WARN] IR 텍스트 파일 없음, 건너뜀")
+
+    # Step 4: analysis.json 생성
     step += 1
     print(f"\n{'='*60}")
     print(f"  [Step {step}/{total_steps}: 분석 데이터 생성]")
@@ -291,12 +308,18 @@ def main():
     if gen_investment:
         step += 1
         gen_report_path = ANALYZER_ROOT / "scripts" / "gen_report.py"
+        ir_text_path = analysis_out / "ir_text.md"
         report_args = [
             sys.executable,
             str(gen_report_path),
             "--company", company,
             "--codes", str(codes_path),
         ]
+        if ir_text_path.exists():
+            report_args.extend(["--ir-text", str(ir_text_path)])
+        enriched_file = analysis_out / "enriched_analysis.json"
+        if enriched_file.exists():
+            report_args.extend(["--enriched-data", str(enriched_file)])
         rc = run_step(f"Step {step}/{total_steps}: 투자검토보고서 생성", report_args, ANALYZER_ROOT)
         if rc != 0:
             print(f"\n[ERROR] 투자검토보고서 생성 실패 (exit code: {rc})")
