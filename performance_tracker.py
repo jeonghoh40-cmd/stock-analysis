@@ -279,8 +279,8 @@ def update_price_tracking(target_date: str = None):
             continue
 
         try:
-            # 추천일 이후 가격 데이터 조회
-            df = yf.Ticker(ticker).history(start=rec_date, timeout=10)
+            # 추천일 이후 가격 데이터 조회 (auto_adjust=True 기본값: 배당·분할 조정 종가)
+            df = yf.Ticker(ticker).history(start=rec_date, auto_adjust=True, timeout=10)
 
             if df.empty or len(df) < 2:
                 continue
@@ -288,6 +288,8 @@ def update_price_tracking(target_date: str = None):
             close_col = df['Close']
 
             # 누락된 day_after 만 INSERT
+            # NOTE: day_after는 거래일 인덱스 (캘린더일 아님).
+            # yfinance DataFrame은 거래일만 포함하므로 iloc[5] = 5거래일 후.
             for day_after in missing_days:
                 if len(df) <= day_after:
                     continue
@@ -582,6 +584,23 @@ def format_verification_section() -> str:
                  f"최우수 기간: {summary['best_day_after']}일 후 | "
                  f"5일 매수 승률: {summary['overall_buy_win_rate']:.1f}% | "
                  f"5일 매도 승률: {summary['overall_sell_win_rate']:.1f}%")
+
+        # 벤치마크 대비 초과 수익(alpha) — 5일 기준
+        try:
+            import yfinance as yf
+            bench = {"KOSPI": "^KS11", "S&P500": "^GSPC"}
+            avg_ret = by_period.get(5, {}).get("buy_avg_return", 0)
+            alpha_parts = []
+            for name, sym in bench.items():
+                h = yf.Ticker(sym).history(period="10d", timeout=10)
+                if len(h) >= 6:
+                    bm_ret = (float(h["Close"].iloc[-1]) / float(h["Close"].iloc[-6]) - 1) * 100
+                    alpha = avg_ret - bm_ret
+                    alpha_parts.append(f"vs {name} {alpha:+.1f}%")
+            if alpha_parts:
+                L.append(f"  벤치마크 대비 Alpha (5일): {' | '.join(alpha_parts)}")
+        except Exception:
+            pass
 
     L.append("=" * 80)
     return "\n".join(L)

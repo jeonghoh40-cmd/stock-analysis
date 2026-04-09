@@ -402,7 +402,7 @@ with tab1:
                 st.info("매수 추천 데이터 없음")
             else:
                 disp = _rec_to_display(buy_df)
-                styled = disp.style.applymap(_style_score, subset=["점수"])
+                styled = disp.style.map(_style_score, subset=["점수"])
                 st.dataframe(styled, use_container_width=True, hide_index=True)
                 st.caption(f"총 {len(buy_df)}개 종목 (최소 점수 40점 이상)")
 
@@ -413,7 +413,7 @@ with tab1:
                 st.info("매도 추천 데이터 없음")
             else:
                 disp = _rec_to_display(sell_df)
-                styled = disp.style.applymap(_style_score, subset=["점수"])
+                styled = disp.style.map(_style_score, subset=["점수"])
                 st.dataframe(styled, use_container_width=True, hide_index=True)
                 st.caption(f"총 {len(sell_df)}개 종목")
 
@@ -423,7 +423,7 @@ with tab1:
 # ───────────────────────────────────────────────────────────────
 with tab2:
     st.subheader("📈 기간별 매수 / 매도 승률")
-    st.caption("이상값(±30% 초과) 제외 기준")
+    st.caption("이상값 제외 기준: 1일 ±20% / 3일 ±25% / 5일 ±30% / 10일 ±40% / 20일 ±60%")
 
     win_data = _get_win_rates()
 
@@ -460,8 +460,8 @@ with tab2:
                       help="데이터 충분 시 가장 신뢰도 높은 지표")
 
         st.dataframe(
-            wr_df.style.applymap(_style_winrate, subset=["매수 승률", "매도 승률"])
-                       .applymap(_style_return, subset=["평균 수익률"]),
+            wr_df.style.map(_style_winrate, subset=["매수 승률", "매도 승률"])
+                       .map(_style_return, subset=["평균 수익률"]),
             use_container_width=True, hide_index=True
         )
 
@@ -475,8 +475,8 @@ with tab2:
         if score_df.empty:
             st.info("데이터 부족")
         else:
-            styled_s = score_df.style.applymap(_style_winrate, subset=["승률"]) \
-                                     .applymap(_style_return, subset=["평균수익률"])
+            styled_s = score_df.style.map(_style_winrate, subset=["승률"]) \
+                                     .map(_style_return, subset=["평균수익률"])
             st.dataframe(styled_s, use_container_width=True, hide_index=True)
             st.caption("👉 40점 이상 구간에서 승률이 높음 → 매수 최소 점수 40점 적용 중")
 
@@ -486,8 +486,8 @@ with tab2:
         if mkt_df.empty:
             st.info("데이터 부족")
         else:
-            styled_m = mkt_df.style.applymap(_style_winrate, subset=["승률"]) \
-                                    .applymap(_style_return, subset=["평균수익률"])
+            styled_m = mkt_df.style.map(_style_winrate, subset=["승률"]) \
+                                    .map(_style_return, subset=["평균수익률"])
             st.dataframe(styled_m, use_container_width=True, hide_index=True)
 
     st.divider()
@@ -533,7 +533,7 @@ with tab2:
         total    = hit_cnt + miss_cnt
         st.caption(f"HIT {hit_cnt}건 / MISS {miss_cnt}건 / 승률 {hit_cnt/total*100:.1f}%" if total else "")
 
-        styled_r = disp_r.style.applymap(_style_return, subset=["수익률"])
+        styled_r = disp_r.style.map(_style_return, subset=["수익률"])
         st.dataframe(styled_r, use_container_width=True, hide_index=True)
 
 
@@ -561,7 +561,7 @@ with tab3:
             st.info(f"{sel_date} {sel_mkt} {sel_sig} 데이터가 없습니다.")
         else:
             disp3 = _rec_to_display(hist_df)
-            styled3 = disp3.style.applymap(_style_score, subset=["점수"])
+            styled3 = disp3.style.map(_style_score, subset=["점수"])
             st.dataframe(styled3, use_container_width=True, hide_index=True)
             st.caption(f"총 {len(hist_df)}개 종목 · {sel_date} · {sel_mkt} · {sel_sig}")
 
@@ -627,7 +627,7 @@ with tab4:
                 pass
             return ""
 
-        styled_ark = ark_df[show_cols].style.applymap(_ark_ret, subset=["20일등락"])
+        styled_ark = ark_df[show_cols].style.map(_ark_ret, subset=["20일등락"])
         st.dataframe(styled_ark, use_container_width=True, hide_index=True)
     else:
         st.info("ARK 데이터 없음. ark_recommended_stocks.py 먼저 실행하세요.")
@@ -698,7 +698,7 @@ with tab5:
             show_cit = ["티커", "종목명", "시장", "위험등급", "섹터",
                         "현재가", "20일등락", "RSI", "위험사유"]
             show_cit = [c for c in show_cit if c in cit_df.columns]
-            styled_cit = cit_df[show_cit].style.applymap(_cit_ret, subset=["20일등락"])
+            styled_cit = cit_df[show_cit].style.map(_cit_ret, subset=["20일등락"])
             st.dataframe(styled_cit, use_container_width=True, hide_index=True)
         else:
             st.info(f"{risk_filter} 위험등급 데이터 없음")

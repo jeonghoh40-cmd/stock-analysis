@@ -240,6 +240,32 @@ def _adx(high: pd.Series, low: pd.Series, close: pd.Series, n: int = 14):
     adx      = dx.ewm(span=n, adjust=False).mean()
     return float(adx.iloc[-1]), float(plus_di.iloc[-1]), float(minus_di.iloc[-1])
 
+def _lbr_3_10(close: pd.Series):
+    """
+    린다 라쉬케 LBR 3/10 오실레이터.
+    빠른선: EMA(3) - EMA(10)  (MACD처럼 두 이평선의 차이)
+    느린선: 빠른선의 SMA(16)  (시그널 라인)
+    추세 분류: 빠른선 > 0 AND 느린선 우상향 → 상승 추세
+    """
+    ema3  = close.ewm(span=3,  adjust=False).mean()
+    ema10 = close.ewm(span=10, adjust=False).mean()
+    fast  = ema3 - ema10                     # 빠른선 (3/10 오실레이터)
+    slow  = fast.rolling(16).mean()          # 느린선 (16일 평균)
+
+    fast_val = float(fast.iloc[-1])
+    slow_val = float(slow.iloc[-1])
+    # 느린선 우상향: 최근 3일 연속 상승
+    slow_recent = slow.dropna().iloc[-3:]
+    slow_rising = False
+    if len(slow_recent) >= 3:
+        slow_rising = bool(
+            slow_recent.iloc[-1] > slow_recent.iloc[-2] > slow_recent.iloc[-3]
+        )
+    # 추세 종목 판정: 빠른선 > 0 AND 느린선 우상향
+    is_trending = fast_val > 0 and slow_rising
+    return fast_val, slow_val, bool(slow_rising), bool(is_trending)
+
+
 def _obv_trend(close: pd.Series, volume: pd.Series, n: int = 20) -> float:
     """
     OBV 추세: OBV가 20일 MA 대비 위에 있으면 양수, 아래면 음수
@@ -248,8 +274,11 @@ def _obv_trend(close: pd.Series, volume: pd.Series, n: int = 20) -> float:
     direction = close.diff().apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
     obv       = (volume * direction).cumsum()
     obv_ma    = obv.rolling(n).mean()
-    diff      = (obv.iloc[-1] - obv_ma.iloc[-1]) / (obv_ma.iloc[-1].clip(1e-9))
-    return round(float(diff), 4)
+    ma_val    = float(obv_ma.iloc[-1])
+    if abs(ma_val) < 1e-9:
+        return 0.0
+    diff      = (float(obv.iloc[-1]) - ma_val) / ma_val
+    return round(diff, 4)
 
 def _week52_pos(close: pd.Series) -> float:
     """
@@ -271,76 +300,115 @@ def _week52_pos(close: pd.Series) -> float:
 def detect_reversal_signal(close: pd.Series, high: pd.Series,
                            low: pd.Series, volume: pd.Series) -> Optional[dict]:
     """
-    RSI 반등 + MACD 골든크로스 + 히스토그램 축소 + 거래량 동반을
-    동시 충족하는 바닥 반전 시그널을 탐지한다.
-    충족 시 시그널 상세 dict 반환, 미충족 시 None.
+    바닥 반전 시그널을 탐지한다. 아래 두 경로 중 하나 이상 충족 시 반환.
+    경로 A: RSI 반등 + MACD 골든크로스/히스토그램 축소 + 거래량 동반
+    경로 B: ADX 하락반전 (하락 추세 종료 — ADX 25 이상에서 하락 전환 + -DI 감소)
     """
     if len(close) < 30:
         return None
 
-    # ① RSI 반등: 최근 5일 내 RSI ≤ 35 터치 후, 현재 RSI가 저점 대비 3pt 이상 반등
-    #    또는 RSI ≤ 30이되 현재 25~50 범위 (바닥권 반등 초기 포착)
+    result = {}  # 시그널 상세
+
+    # ── 경로 A: RSI + MACD + 거래량 ──
+    path_a = False
     rsi_vals = _rsi_series(close, lookback=5)
-    if len(rsi_vals) < 5:
-        return None
-    rsi_low  = min(rsi_vals)
-    rsi_now  = rsi_vals[-1]
-    rsi_bounce = rsi_now - rsi_low  # 반등폭
-    rsi_ok = (rsi_low <= 35 and rsi_now <= 50
-              and (rsi_bounce >= 3 or rsi_now >= 30))
+    rsi_low = rsi_now = 0.0
+    if len(rsi_vals) >= 5:
+        rsi_low  = min(rsi_vals)
+        rsi_now  = rsi_vals[-1]
+        rsi_bounce = rsi_now - rsi_low
+        rsi_ok = (rsi_low <= 35 and rsi_now <= 50
+                  and (rsi_bounce >= 3 or rsi_now >= 30))
+    else:
+        rsi_ok = False
 
-    if not rsi_ok:
-        return None
-
-    # ② MACD 골든크로스 / ③ 히스토그램 축소
-    macd_l, sig_l, hist_l = _macd_series(close, lookback=5)
-    if len(hist_l) < 4:
-        return None
-
-    # 골든크로스: 최근 3일 내 hist가 음→양 전환, 또는 macd > signal 전환
     macd_cross_day = None
-    for i in range(max(0, len(hist_l) - 3), len(hist_l)):
-        if i > 0 and hist_l[i - 1] < 0 and hist_l[i] >= 0:
-            macd_cross_day = len(hist_l) - i  # N일 전
-            break
-
-    # 히스토그램 축소: 음수이되 2일 이상 절대값 감소, 또는 이미 양전환
-    hist_shrinking = False
     hist_shrink_days = 0
-    if hist_l[-1] >= 0:
-        hist_shrinking = True
-        hist_shrink_days = 0
-    elif len(hist_l) >= 3:
-        recent = [abs(h) for h in hist_l[-3:]]
-        if recent[-2] > recent[-1]:
-            hist_shrinking = True
-            hist_shrink_days = 2
+    hist_latest = 0.0
+    vol_spike = 0.0
+    if rsi_ok:
+        macd_l, sig_l, hist_l = _macd_series(close, lookback=5)
         if len(hist_l) >= 4:
-            recent4 = [abs(h) for h in hist_l[-4:]]
-            if recent4[-3] > recent4[-2] > recent4[-1]:
-                hist_shrink_days = 3
+            for i in range(max(0, len(hist_l) - 3), len(hist_l)):
+                if i > 0 and hist_l[i - 1] < 0 and hist_l[i] >= 0:
+                    macd_cross_day = len(hist_l) - i
+                    break
+            hist_shrinking = False
+            if hist_l[-1] >= 0:
+                hist_shrinking = True
+            elif len(hist_l) >= 3:
+                recent = [abs(h) for h in hist_l[-3:]]
+                if recent[-2] > recent[-1]:
+                    hist_shrinking = True
+                    hist_shrink_days = 2
+                if len(hist_l) >= 4:
+                    recent4 = [abs(h) for h in hist_l[-4:]]
+                    if recent4[-3] > recent4[-2] > recent4[-1]:
+                        hist_shrink_days = 3
+            hist_latest = hist_l[-1]
+            # MACD 골든크로스는 5일 이내만 유효 (오래된 신호 무효화)
+            macd_cross_fresh = macd_cross_day is not None and macd_cross_day <= 5
+            macd_ok = macd_cross_fresh or hist_shrinking
 
-    macd_ok = (macd_cross_day is not None) or hist_shrinking
-    if not macd_ok:
+            if macd_ok:
+                vol_ma20 = float(volume.rolling(20).mean().iloc[-1])
+                vol_3d   = [float(v) for v in volume.iloc[-3:]]
+                vol_spike = max(v / (vol_ma20 + 1e-9) for v in vol_3d)
+                if vol_spike >= 1.0:
+                    path_a = True
+
+    # ── 경로 B: ADX 하락반전 (하락 추세 종료) — _adx() 재사용 ──
+    adx_reversal = False
+    adx_peak = adx_now = plus_di_now = minus_di_now = 0.0
+    try:
+        adx_val_b, pdi_b, mdi_b = _adx(high, low, close)
+        adx_now = adx_val_b
+        plus_di_now = pdi_b
+        minus_di_now = mdi_b
+        # 피크 추정: 최근 10일 ADX 시리즈로 계산
+        prev_close_b = close.shift()
+        plus_dm_b  = high.diff().clip(lower=0)
+        minus_dm_b = (-low.diff()).clip(lower=0)
+        cond_b = plus_dm_b <= minus_dm_b
+        plus_dm_c_b = plus_dm_b.copy(); plus_dm_c_b[cond_b] = 0
+        cond2_b = minus_dm_b <= plus_dm_b
+        minus_dm_c_b = minus_dm_b.copy(); minus_dm_c_b[cond2_b] = 0
+        tr_b = pd.concat([high - low, (high - prev_close_b).abs(),
+                          (low - prev_close_b).abs()], axis=1).max(axis=1)
+        atr_b    = tr_b.ewm(span=14, adjust=False).mean()
+        pdi_s    = 100 * plus_dm_c_b.ewm(span=14, adjust=False).mean() / (atr_b + 1e-9)
+        mdi_s    = 100 * minus_dm_c_b.ewm(span=14, adjust=False).mean() / (atr_b + 1e-9)
+        dx_b     = 100 * (pdi_s - mdi_s).abs() / (pdi_s + mdi_s + 1e-9)
+        adx_series = dx_b.ewm(span=14, adjust=False).mean()
+        adx_recent = adx_series.dropna().iloc[-10:]
+        mdi_recent = mdi_s.dropna().iloc[-5:]
+        pdi_recent = pdi_s.dropna().iloc[-5:]
+        if len(adx_recent) >= 5 and len(mdi_recent) >= 3:
+            adx_peak = float(adx_recent.max())
+            adx_declining = adx_now < adx_peak - 2
+            was_downtrend = minus_di_now > plus_di_now or float(mdi_recent.iloc[-3]) > float(pdi_recent.iloc[-3])
+            mdi_weakening = float(mdi_recent.iloc[-1]) < float(mdi_recent.iloc[-2])
+            if adx_peak >= 25 and adx_declining and was_downtrend and mdi_weakening:
+                adx_reversal = True
+    except (IndexError, ValueError, KeyError):
+        pass
+
+    if not path_a and not adx_reversal:
         return None
 
-    # ④ 거래량 동반: 최근 3일 중 1일 이상 거래량 ≥ 20일 평균 × 1.0
-    vol_ma20 = float(volume.rolling(20).mean().iloc[-1])
-    vol_3d   = [float(v) for v in volume.iloc[-3:]]
-    vol_spike = max(v / (vol_ma20 + 1e-9) for v in vol_3d)
-    vol_ok   = vol_spike >= 1.0
-
-    if not vol_ok:
-        return None
-
-    return {
+    result = {
         "rsi_low":          round(rsi_low, 1),
         "rsi_now":          round(rsi_now, 1),
-        "macd_cross_days":  macd_cross_day,    # None이면 히스토그램 축소만
-        "hist_shrink_days": hist_shrink_days,   # 0이면 이미 양전환
-        "hist_latest":      round(hist_l[-1], 4),
+        "macd_cross_days":  macd_cross_day,
+        "hist_shrink_days": hist_shrink_days,
+        "hist_latest":      round(hist_latest, 4),
         "vol_spike":        round(vol_spike, 2),
+        "adx_reversal":     adx_reversal,
+        "adx_peak":         round(adx_peak, 1),
+        "adx_now":          round(adx_now, 1),
+        "path_a":           path_a,
     }
+    return result
 
 
 def detect_bearish_signal(close: pd.Series, high: pd.Series,
@@ -433,6 +501,196 @@ def detect_bearish_signal(close: pd.Series, high: pd.Series,
 
 
 # ═══════════════════════════════════════════════════════════════
+# 2~3일 복합 추세 시그널
+# ═══════════════════════════════════════════════════════════════
+
+def detect_multi_day_trend(close: pd.Series, high: pd.Series,
+                           low: pd.Series, volume: pd.Series) -> Optional[dict]:
+    """
+    2~3일 복합 추세 시그널 탐지.
+    가격 방향 + RSI 개선/악화 + MACD 히스토그램 방향 + 거래량 뒷받침
+    4개 중 3개 이상 일치 시 시그널 반환.
+    """
+    if len(close) < 30:
+        return None
+
+    closes = [float(c) for c in close.iloc[-4:]]  # 4일분 (3번 비교)
+    if len(closes) < 4:
+        return None
+
+    # ── 상승 방향 체크 ──
+    up_days = sum(1 for i in range(1, 4) if closes[i] > closes[i - 1])
+    dn_days = sum(1 for i in range(1, 4) if closes[i] < closes[i - 1])
+    price_up = up_days >= 2
+    price_dn = dn_days >= 2
+
+    if not price_up and not price_dn:
+        return None  # 방향 불분명
+
+    # RSI 3일 전 vs 현재
+    rsi_vals = _rsi_series(close, lookback=4)
+    if len(rsi_vals) < 4:
+        return None
+    rsi_3d_ago = rsi_vals[-4]
+    rsi_now    = rsi_vals[-1]
+    rsi_improving = rsi_now > rsi_3d_ago and rsi_now < 60
+    rsi_worsening = rsi_now < rsi_3d_ago and rsi_now > 40
+
+    # MACD 히스토그램 3일 방향
+    _, _, hist_l = _macd_series(close, lookback=4)
+    if len(hist_l) < 3:
+        return None
+    hist_3d = hist_l[-3:]
+    macd_improving = hist_3d[-1] > hist_3d[-2] > hist_3d[-3]   # 연속 증가
+    macd_worsening = hist_3d[-1] < hist_3d[-2] < hist_3d[-3]   # 연속 감소
+
+    # 거래량: 상승일 vs 하락일 평균 비교
+    vols = [float(v) for v in volume.iloc[-3:]]
+    up_vols, dn_vols = [], []
+    for i in range(1, 4):
+        if closes[i] > closes[i - 1]:
+            up_vols.append(vols[i - 1])
+        elif closes[i] < closes[i - 1]:
+            dn_vols.append(vols[i - 1])
+    avg_up = sum(up_vols) / len(up_vols) if up_vols else 0
+    avg_dn = sum(dn_vols) / len(dn_vols) if dn_vols else 0
+    vol_buy_dominant  = avg_up > avg_dn * 1.0 if avg_dn > 0 else bool(up_vols)
+    vol_sell_dominant = avg_dn > avg_up * 1.0 if avg_up > 0 else bool(dn_vols)
+
+    # ── 상승 추세 형성 판정 ──
+    if price_up:
+        conds = [price_up, rsi_improving, macd_improving, vol_buy_dominant]
+        met = sum(conds)
+        if met >= 3:
+            return {
+                "direction":      "up",
+                "price_trend":    price_up,
+                "rsi_improving":  rsi_improving,
+                "rsi_3d_ago":     round(rsi_3d_ago, 1),
+                "rsi_now":        round(rsi_now, 1),
+                "macd_improving": macd_improving,
+                "hist_3d":        [round(h, 4) for h in hist_3d],
+                "vol_confirmed":  vol_buy_dominant,
+                "conditions_met": met,
+                "strength":       "strong" if met == 4 else "moderate",
+            }
+
+    # ── 하락 추세 형성 판정 ──
+    if price_dn:
+        conds = [price_dn, rsi_worsening, macd_worsening, vol_sell_dominant]
+        met = sum(conds)
+        if met >= 3:
+            return {
+                "direction":      "down",
+                "price_trend":    price_dn,
+                "rsi_improving":  rsi_worsening,  # 역방향이므로 "악화"
+                "rsi_3d_ago":     round(rsi_3d_ago, 1),
+                "rsi_now":        round(rsi_now, 1),
+                "macd_improving": macd_worsening,
+                "hist_3d":        [round(h, 4) for h in hist_3d],
+                "vol_confirmed":  vol_sell_dominant,
+                "conditions_met": met,
+                "strength":       "strong" if met == 4 else "moderate",
+            }
+
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════
+# 상관관계 분석 (섹터 로테이션 감지)
+# ═══════════════════════════════════════════════════════════════
+
+def compute_correlations(candidates: list, period: str = "3mo") -> dict:
+    """
+    매수/매도 후보 종목 vs 벤치마크(KOSPI, S&P500, 환율, 유가)의
+    30일 수익률 상관계수를 계산한다.
+    디커플링 감지: 최근 10일 vs 이전 20일 상관관계 급변.
+    """
+    import yfinance as yf
+
+    benchmarks = {
+        "KOSPI":  "^KS11",
+        "S&P500": "^GSPC",
+        "USD/KRW": "KRW=X",
+        "WTI":    "CL=F",
+    }
+
+    # 벤치마크 수익률 수집
+    bm_returns = {}
+    try:
+        bm_tickers = list(benchmarks.values())
+        bm_data = yf.download(bm_tickers, period=period, auto_adjust=True,
+                              progress=False, threads=True)
+        if "Close" in bm_data.columns or hasattr(bm_data.columns, 'levels'):
+            for name, ticker in benchmarks.items():
+                try:
+                    if len(bm_tickers) == 1:
+                        closes = bm_data["Close"]
+                    else:
+                        closes = bm_data["Close"][ticker]
+                    ret = closes.pct_change().dropna()
+                    if len(ret) >= 20:
+                        bm_returns[name] = ret
+                except Exception:
+                    continue
+    except Exception:
+        return {}
+
+    if not bm_returns:
+        return {}
+
+    # 종목별 상관관계 계산
+    result = {}
+    tickers_done = set()
+    for r in candidates:
+        ticker = r["ticker"]
+        if ticker in tickers_done:
+            continue
+        tickers_done.add(ticker)
+        try:
+            df = yf.download(ticker, period=period, auto_adjust=True, progress=False)
+            if df.empty or len(df) < 20:
+                continue
+            stock_ret = df["Close"].pct_change().dropna()
+            if hasattr(stock_ret, 'columns'):
+                stock_ret = stock_ret.iloc[:, 0]
+
+            corrs = {}
+            decoupling = []
+            for bm_name, bm_ret in bm_returns.items():
+                # 공통 인덱스
+                common = stock_ret.index.intersection(bm_ret.index)
+                if len(common) < 20:
+                    continue
+                s = stock_ret.loc[common]
+                b = bm_ret.loc[common]
+
+                # 전체 30일 상관계수
+                corr_30 = float(s.tail(30).corr(b.tail(30)))
+                corrs[bm_name] = round(corr_30, 2)
+
+                # 디커플링 감지: 최근 10일 vs 이전 20일
+                if len(common) >= 30:
+                    corr_recent = float(s.tail(10).corr(b.tail(10)))
+                    corr_prev   = float(s.iloc[-30:-10].corr(b.iloc[-30:-10]))
+                    diff = corr_recent - corr_prev
+                    if abs(diff) >= 0.4:  # 상관관계 급변
+                        direction = "디커플링↑" if diff > 0 else "디커플링↓"
+                        decoupling.append(f"{bm_name}({direction},{diff:+.2f})")
+
+            if corrs:
+                result[ticker] = {
+                    "name": r["name"],
+                    "corrs": corrs,
+                    "decoupling": decoupling,
+                }
+        except Exception:
+            continue
+
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════
 # 종합 스코어링
 # ═══════════════════════════════════════════════════════════════
 
@@ -446,77 +704,114 @@ def _lerp(x: float, bp: list, sc: list) -> float:
     return sc[i] + t * (sc[i + 1] - sc[i])
 
 
+_REGIME_WEIGHTS = {
+    "강세":     {"rsi": 0.7, "stoch": 0.7, "macd": 1.3, "ma_align": 1.3, "ma5v20": 1.0,
+                 "mom5": 1.0, "adx": 1.5, "macd_adx": 1.3, "obv": 1.0, "pos52w": 1.0},
+    "중립":     {"rsi": 1.0, "stoch": 1.0, "macd": 1.0, "ma_align": 1.0, "ma5v20": 1.0,
+                 "mom5": 1.0, "adx": 1.0, "macd_adx": 1.0, "obv": 1.0, "pos52w": 1.0},
+    "약세":     {"rsi": 1.0, "stoch": 1.0, "macd": 0.8, "ma_align": 1.0, "ma5v20": 1.0,
+                 "mom5": 1.0, "adx": 1.0, "macd_adx": 0.8, "obv": 1.3, "pos52w": 1.3},
+    "극도약세": {"rsi": 1.3, "stoch": 1.3, "macd": 0.7, "ma_align": 0.7, "ma5v20": 1.0,
+                 "mom5": 1.0, "adx": 0.5, "macd_adx": 0.5, "obv": 1.3, "pos52w": 1.3},
+}
+
+
 def score_technical(rsi, macd_hist, price, ma5, ma20, ma60, mom5,
-                    stoch_k, adx, plus_di, minus_di, obv_trend, pos_52w) -> float:
+                    stoch_k, adx, plus_di, minus_di, obv_trend, pos_52w,
+                    atr_pct=0.0, regime="중립",
+                    return_breakdown=False):
     """
-    기술적 종합 점수 –100 ~ +100 (연속값)
-    v3 기존 지표 + ATR기반 ADX 신뢰도 + 스토캐스틱 + OBV + 52주 위치
-    선형 보간으로 일일 소폭 변동도 점수에 반영
+    기술적 종합 점수 -100 ~ +100 (연속값)
+    regime: 시장 국면 (강세/중립/약세/극도약세) — 지표별 가중치 조절
+    return_breakdown: True이면 지표별 기여도 dict 반환
     """
-    s = 0.0
+    _atr_norm = max(atr_pct, 0.5)
+    w = _REGIME_WEIGHTS.get(regime, _REGIME_WEIGHTS["중립"])
+    bd = {}  # breakdown
 
-    # RSI (±35) — 연속 보간
-    s += _lerp(rsi, [0, 20, 30, 40, 50, 60, 70, 80, 100],
-                    [35, 35, 20, 8,  0, -8, -20, -35, -35])
+    # RSI (±35)
+    _rsi = _lerp(rsi, [0, 20, 30, 40, 50, 60, 70, 80, 100],
+                      [35, 35, 20, 8,  0, -8, -20, -35, -35])
+    bd["RSI"] = round(_rsi * w["rsi"], 1)
 
-    # 스토캐스틱 (±10) — 연속 보간
-    s += _lerp(stoch_k, [0, 20, 30, 50, 70, 80, 100],
-                        [10, 10, 5,  0, -5, -10, -10])
+    # 스토캐스틱 (±10)
+    _stoch = _lerp(stoch_k, [0, 20, 30, 50, 70, 80, 100],
+                             [10, 10, 5,  0, -5, -10, -10])
+    bd["Stoch"] = round(_stoch * w["stoch"], 1)
 
-    # MACD 히스토그램 (±15) — 0 근처 전환 구간
-    s += _lerp(macd_hist, [-0.5, -0.01, 0, 0.01, 0.5],
-                          [-15,  -15,   0, 15,   15])
+    # MACD 히스토그램 (±15)
+    macd_norm = macd_hist / (price * _atr_norm / 100) if price > 0 else macd_hist
+    _macd = _lerp(macd_norm, [-1.0, -0.1, 0, 0.1, 1.0],
+                              [-15,  -15,  0, 15,  15])
+    bd["MACD"] = round(_macd * w["macd"], 1)
 
-    # 이동평균 정배열 (±15) — 가격-MA20 갭% 기반
+    # 이동평균 정배열 (±15)
     if ma20 and ma20 > 0:
         gap_pct = (price - ma20) / ma20 * 100
-        ma_score = _lerp(gap_pct, [-5, -2, 0, 2, 5],
-                                  [-15, -7, 0, 7, 15])
-        if ma60 and ma60 > 0:
-            if ma20 > ma60:   ma_score *= 1.0    # 정배열 유지
-            elif ma20 < ma60: ma_score *= 0.7    # 역배열 감쇠
-        s += ma_score
+        gap_atr = gap_pct / _atr_norm
+        _ma = _lerp(gap_atr, [-3, -1.2, 0, 1.2, 3],
+                              [-15, -7,  0, 7,  15])
+        if ma60 and ma60 > 0 and ma20 < ma60:
+            _ma *= 0.7
     else:
-        s += 0
+        _ma = 0.0
+    bd["MA정배열"] = round(_ma * w["ma_align"], 1)
 
-    # MA5 vs MA20 (±8) — 갭% 기반
+    # MA5 vs MA20 (±8)
     if ma20 and ma20 > 0 and ma5:
         ma5_gap = (ma5 - ma20) / ma20 * 100
-        s += _lerp(ma5_gap, [-3, -1, 0, 1, 3],
-                            [-8, -4, 0, 4, 8])
+        ma5_atr = ma5_gap / _atr_norm
+        _m5 = _lerp(ma5_atr, [-2, -0.6, 0, 0.6, 2],
+                              [-8,  -4,  0, 4,   8])
     else:
-        s += 0
+        _m5 = 0.0
+    bd["MA5v20"] = round(_m5 * w["ma5v20"], 1)
 
     # 5일 모멘텀 (±8)
-    s += _lerp(mom5, [-10, -5, -2, 0, 2, 5, 10],
-                     [-8,  -8, -4, 0, 4, 8, 8])
+    mom_atr = mom5 / _atr_norm
+    _mom = _lerp(mom_atr, [-3, -1.5, -0.5, 0, 0.5, 1.5, 3],
+                           [-8,  -8,   -4,  0, 4,   8,   8])
+    bd["모멘텀"] = round(_mom * w["mom5"], 1)
 
-    # ADX 추세 강도 보정 (신호 증폭/감쇠)
+    # ADX 추세 강도 (±4)
+    _adx_s = 0.0
     if adx > 25:
         trend_dir = 1 if plus_di > minus_di else -1
-        s += min(adx - 25, 20) * 0.2 * trend_dir  # 최대 ±4
-    elif adx < 15:
-        s = s * 0.8  # 횡보 시 신호 20% 감쇠
+        _adx_s = min(adx - 25, 20) * 0.2 * trend_dir
+    bd["ADX"] = round(_adx_s * w["adx"], 1)
 
-    # MACD+ADX 복합 추세 점수 (0~+10)
-    macd_adx = 0.0
+    # ADX < 15 감쇠는 전체 합산 후 적용 (breakdown에는 개별 표기)
+    _adx_damping = 0.8 if adx < 15 else 1.0
+
+    # MACD+ADX 복합 (0~10)
+    _madx = 0.0
     if adx > 25:
-        macd_adx += 2
+        _madx += 2
         if plus_di > minus_di:
-            macd_adx += 3
+            _madx += 3
     if macd_hist > 0:
-        macd_adx += 5
-    s += macd_adx
+        _madx += 5
+    bd["MACD+ADX"] = round(_madx * w["macd_adx"], 1)
 
-    # OBV 추세 (±5) — 연속 보간
-    s += _lerp(obv_trend, [-0.1, -0.05, 0, 0.05, 0.1],
-                          [-5,   -5,    0, 5,    5])
+    # OBV 추세 (±5)
+    _obv = _lerp(obv_trend, [-0.1, -0.05, 0, 0.05, 0.1],
+                              [-5,   -5,    0, 5,    5])
+    bd["OBV"] = round(_obv * w["obv"], 1)
 
-    # 52주 위치 (±5) — 연속 보간 (U자형: 저점 반등 + 고점 모멘텀)
-    s += _lerp(pos_52w, [0, 15, 30, 50, 70, 85, 100],
-                        [3,  3, -2,  0,  2,  5,  5])
+    # 52주 위치 (±5)
+    _52w = _lerp(pos_52w, [0, 15, 30, 50, 70, 85, 100],
+                           [3,  3, -2,  0,  2,  5,  5])
+    bd["52주"] = round(_52w * w["pos52w"], 1)
 
-    return round(max(-100.0, min(100.0, s)), 1)
+    # 합산
+    s = sum(bd.values()) * _adx_damping
+    total = round(max(-100.0, min(100.0, s)), 1)
+
+    if return_breakdown:
+        bd["total"] = total
+        bd["regime"] = regime
+        return bd
+    return total
 
 
 def score_fundamental(pe, pb, roe, margin, eps_growth) -> int:
@@ -574,6 +869,36 @@ def score_with_investor_weight(ticker: str, base_score: float) -> float:
         return max(-100.0, min(100.0, base_score + bonus))
     except Exception:
         return base_score
+
+
+def apply_regime_weights(all_results: dict, regime: str) -> int:
+    """
+    레짐 판정 후 전 종목의 기술점수를 국면별 가중치로 재계산한다.
+    score_breakdown도 갱신한다. 갱신된 종목 수를 반환.
+    """
+    updated = 0
+    for market, stocks in all_results.items():
+        for r in stocks:
+            bd = r.get("score_breakdown")
+            if not bd or regime == bd.get("regime", "중립"):
+                continue
+            # 원시 지표값으로 재계산
+            new_bd = score_technical(
+                r["rsi"], r["macd_hist"], r["price"],
+                r["ma5"], r["ma20"], r["ma60"], r["mom5"],
+                r["stoch_k"], r["adx"], r["plus_di"], r["minus_di"],
+                r["obv_trend"], r["pos_52w"],
+                atr_pct=r.get("atr_pct", 0),
+                regime=regime, return_breakdown=True,
+            )
+            # 기존 점수와의 차이를 score에 반영
+            old_tech = bd.get("total", 0)
+            new_tech = new_bd.get("total", 0)
+            diff = new_tech - old_tech
+            r["score"] = round(r["score"] + diff, 1)
+            r["score_breakdown"] = new_bd
+            updated += 1
+    return updated
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -675,18 +1000,24 @@ def screen_one(market: str, name: str, ticker: str) -> Optional[dict]:
             if col in df.columns:
                 df = df.drop(columns=[col])
 
-        # ── 장 중 실행 시 오늘 미확정 행 분리 ──────────────────────────
-        # 기술적 지표는 전일 확정 종가 기반으로 계산하고,
-        # 당일 장중 가격은 별도 필드(today_price/today_chg)로 보관
+        # ── 장 중/마감 후 오늘 행 처리 ──────────────────────────────
+        # 장 마감 후(KR 15:30, US 16:00): 오늘 종가를 확정가로 사용
+        # 장 중: 오늘 행 분리 → 전일 확정 종가 기반, 장중가는 별도 필드
         today_price: Optional[float] = None
         today_chg:   Optional[float] = None
         if len(df) > 0 and df.index[-1].date() == datetime.date.today():
-            today_raw = float(df["Close"].iloc[-1])
-            df = df.iloc[:-1]          # 오늘 행 제거 → 전일 확정 종가 기반 유지
-            if len(df) >= 1 and not (today_raw != today_raw):  # nan check
-                prev_close = float(df["Close"].iloc[-1])
-                today_price = today_raw
-                today_chg   = round((today_raw - prev_close) / prev_close * 100, 2)
+            now_hour = datetime.datetime.now().hour
+            is_kr = ticker.endswith(".KS") or ticker.endswith(".KQ")
+            market_closed = (is_kr and now_hour >= 16) or (not is_kr and now_hour >= 6)
+            # 장 마감 후 → 오늘 종가를 확정가로 유지 (행 제거 안 함)
+            if not market_closed:
+                # 장 중 → 오늘 미확정 행 분리
+                today_raw = float(df["Close"].iloc[-1])
+                df = df.iloc[:-1]
+                if len(df) >= 1 and not (today_raw != today_raw):
+                    prev_close = float(df["Close"].iloc[-1])
+                    today_price = today_raw
+                    today_chg   = round((today_raw - prev_close) / prev_close * 100, 2)
 
         # ── Volume=0 placeholder 행 제거 (장 미개시/yfinance 지연 데이터) ──
         while len(df) > 0:
@@ -727,12 +1058,16 @@ def screen_one(market: str, name: str, ticker: str) -> Optional[dict]:
         atr_pct             = round(atr_val / price * 100, 2) if price > 0 else 0.0
         stoch_k, stoch_d    = _stochastic(high, low, close)
         adx_val, plus_di, minus_di = _adx(high, low, close)
+        lbr_fast, lbr_slow, lbr_slow_rising, lbr_trending = _lbr_3_10(close)
         obv                 = _obv_trend(close, volume)
         pos_52w             = _week52_pos(close)
 
         vol_avg   = float(volume.rolling(20).mean().iloc[-1])
         vol_cur   = float(volume.iloc[-1])
         vol_ratio = round(vol_cur / (vol_avg + 1e-9), 2)
+
+        # 거래량 0 종목: 거래정지 또는 데이터 이상 → 점수 대폭 차감
+        trading_halted = vol_cur == 0 and vol_avg > 0
 
         # MACD+ADX 복합 추세 점수 (0~10) — 리포트 표시용 별도 계산
         _ma_score = 0
@@ -744,17 +1079,53 @@ def screen_one(market: str, name: str, ticker: str) -> Optional[dict]:
             _ma_score += 5
         macd_adx_score = _ma_score
 
-        # 기술적 점수
+        # 기술적 점수 (ATR 정규화 적용)
         tech_score = score_technical(
             rsi, macd_hist, price, ma5, ma20, ma60, mom5,
-            stoch_k, adx_val, plus_di, minus_di, obv, pos_52w
+            stoch_k, adx_val, plus_di, minus_di, obv, pos_52w,
+            atr_pct=atr_pct,
         )
+        # Feature Importance breakdown (레짐 무관 — 레짐 보정은 main에서)
+        _bd = score_technical(
+            rsi, macd_hist, price, ma5, ma20, ma60, mom5,
+            stoch_k, adx_val, plus_di, minus_di, obv, pos_52w,
+            atr_pct=atr_pct, return_breakdown=True,
+        )
+        # 거래정지 감점
+        if trading_halted:
+            tech_score -= 50
+
         # 투자자 가중치
         score = score_with_investor_weight(ticker, tech_score)
 
         # 반전 시그널 탐지
         reversal = detect_reversal_signal(close, high, low, volume)
         bearish  = detect_bearish_signal(close, high, low, volume)
+        multi_day = detect_multi_day_trend(close, high, low, volume)
+
+        # ── LBR 3/10 추세 판정 (리포트 표시용, 스크리닝 제외하지 않음) ──
+        # lbr_trending 값은 리포트의 "추세 매수 시그널" 섹션에서 활용
+
+        # ── 주봉 20주 이동평균선 우상향 판정 (리포트 표시용) ──────
+        weekly_ma20_rising = True  # 기본값: 통과 (데이터 부족 시)
+        if not is_recently_listed and len(df) >= 100:  # 약 20주(100 거래일) 이상
+            try:
+                wk = df.resample("W-FRI").agg({
+                    "Open": "first", "High": "max", "Low": "min",
+                    "Close": "last", "Volume": "sum",
+                }).dropna()
+                if len(wk) >= 22:  # 20주 MA + 기울기 판정용 2주 여유
+                    wk_ma20 = wk["Close"].rolling(20).mean()
+                    # 최근 3주간 MA20이 연속 상승하면 '우상향'
+                    recent_ma = wk_ma20.dropna().iloc[-3:]
+                    if len(recent_ma) >= 3:
+                        weekly_ma20_rising = (
+                            recent_ma.iloc[-1] > recent_ma.iloc[-2] > recent_ma.iloc[-3]
+                        )
+                    else:
+                        weekly_ma20_rising = True
+            except Exception:
+                weekly_ma20_rising = True  # 리샘플 실패 시 판정 생략
 
         return {
             "market": market, "name": name, "ticker": ticker,
@@ -770,13 +1141,18 @@ def screen_one(market: str, name: str, ticker: str) -> Optional[dict]:
             "atr": round(atr_val, 2), "atr_pct": atr_pct,
             "stoch_k": round(stoch_k, 1), "stoch_d": round(stoch_d, 1),
             "adx": round(adx_val, 1), "plus_di": round(plus_di, 1), "minus_di": round(minus_di, 1),
+            "lbr_fast": round(lbr_fast, 4), "lbr_slow": round(lbr_slow, 4),
+            "lbr_trending": lbr_trending,
             "obv_trend": obv, "pos_52w": pos_52w,
             "macd_adx_score": macd_adx_score,   # 0~10: 추세(ADX)+방향(+DI)+타이밍(MACD) 복합
             "score": score,
             "fund": {},  # 펀더멘털은 Phase 2에서 채움
             "is_recently_listed": is_recently_listed,
+            "weekly_ma20_rising": bool(weekly_ma20_rising),
             "reversal_signal": reversal,
             "bearish_signal": bearish,
+            "multi_day_trend": multi_day,
+            "score_breakdown": _bd,
         }
     except Exception:
         return None
@@ -1187,13 +1563,13 @@ _KR_ETF_LIST = [
 ]
 
 
-def collect_kr_etf_picks(top_n: int = 5) -> list:
+def _collect_etf_picks(etf_list: list, top_n: int = 5) -> list:
     """
-    국내 주요 ETF 성과 분석 → 모멘텀 기준 상위 N개 반환.
+    ETF 성과 분석 → 모멘텀 기준 상위 N개 반환 (국내/중국 공통).
     각 ETF의 1일·5일·20일 수익률을 계산하고 모멘텀 점수로 정렬.
     """
     results = []
-    for ticker, name, holdings in _KR_ETF_LIST:
+    for ticker, name, holdings in etf_list:
         try:
             h = yf.Ticker(ticker).history(period="30d", timeout=10)
             if h.empty or len(h) < 5:
@@ -1205,7 +1581,6 @@ def collect_kr_etf_picks(top_n: int = 5) -> list:
             d1   = round((cur - prev) / prev * 100, 2)
             d5   = round((cur - w5)   / w5   * 100, 2)
             d20  = round((cur - w20)  / w20  * 100, 2)
-            # 모멘텀 점수: 5일×2 + 20일×1
             score = d5 * 2 + d20
             results.append({
                 "ticker":   ticker,
@@ -1224,55 +1599,24 @@ def collect_kr_etf_picks(top_n: int = 5) -> list:
     return results[:top_n]
 
 
+def collect_kr_etf_picks(top_n: int = 5) -> list:
+    return _collect_etf_picks(_KR_ETF_LIST, top_n)
+
+
 # 중국 ETF 풀 (KRX 상장 — 한국 증권사 판매)
 _CHINA_ETF_LIST = [
-    # (티커, 이름, 주요 구성/특징)
     ("192090.KS", "TIGER 차이나 CSI300", ["중국 A 주 대형주 300 개", "시가총액 가중"]),
     ("371160.KS", "KODEX 차이나항셍테크", ["알리바바", "텐센트", "메이투안"]),
     ("305540.KS", "TIGER 차이나전기차", ["BYD", "CATL", "NIO", "리오토"]),
     ("099140.KS", "KODEX 차이나 H 주", ["중국 블루칩 H 주", "항셍중국기업지수"]),
     ("192720.KS", "TIGER 차이나 CSI500", ["중국 중소형 성장주 500 개"]),
-    # 152280.KS (TIGER 차이나항셍H주), 304850.KS (KBSTAR 중국본토CSI100) — 상폐/yfinance 미지원으로 제거
     ("290130.KS", "TIGER 차이나소비테마", ["중국 내수 소비", "중산층 확대 수혜"]),
     ("391600.KS", "KODEX 차이나과창판 STAR50", ["상하이 STAR Market", "반도체·바이오·AI"]),
 ]
 
 
 def collect_china_etf_picks(top_n: int = 5) -> list:
-    """
-    중국 ETF 성과 분석 → 모멘텀 기준 상위 N 개 반환.
-    각 ETF 의 1 일·5 일·20 일 수익률을 계산하고 모멘텀 점수로 정렬.
-    """
-    results = []
-    for ticker, name, holdings in _CHINA_ETF_LIST:
-        try:
-            h = yf.Ticker(ticker).history(period="30d", timeout=10)
-            if h.empty or len(h) < 5:
-                continue
-            cur  = float(h["Close"].iloc[-1])
-            prev = float(h["Close"].iloc[-2])
-            w5   = float(h["Close"].iloc[-6]) if len(h) >= 6 else float(h["Close"].iloc[0])
-            w20  = float(h["Close"].iloc[-21]) if len(h) >= 21 else float(h["Close"].iloc[0])
-            d1   = round((cur - prev) / prev * 100, 2)
-            d5   = round((cur - w5)   / w5   * 100, 2)
-            d20  = round((cur - w20)  / w20  * 100, 2)
-            # 모멘텀 점수: 5 일×2 + 20 일×1
-            score = d5 * 2 + d20
-            results.append({
-                "ticker":   ticker,
-                "name":     name,
-                "price":    round(cur, 0),
-                "price_date": h.index[-1].strftime("%m/%d"),
-                "d1":       d1,
-                "d5":       d5,
-                "d20":      d20,
-                "score":    score,
-                "holdings": holdings,
-            })
-        except Exception:
-            pass
-    results.sort(key=lambda x: x["score"], reverse=True)
-    return results[:top_n]
+    return _collect_etf_picks(_CHINA_ETF_LIST, top_n)
 
 
 def collect_sector_flows() -> dict:
@@ -1448,7 +1792,13 @@ def _extract_claude_json(text: str) -> "tuple[str, dict]":
     after  = text[m.end():].lstrip()
     clean_text = after if after else before
     try:
-        return clean_text, json.loads(json_str)
+        parsed = json.loads(json_str)
+        # 필수 필드 검증: 누락 시 빈 리스트 기본값 설정
+        if "top_buy" not in parsed:
+            parsed["top_buy"] = []
+        if "top_sell" not in parsed:
+            parsed["top_sell"] = []
+        return clean_text, parsed
     except json.JSONDecodeError:
         return text, {}
 
@@ -1494,7 +1844,8 @@ def ask_claude_v4(kospi_buy, kosdaq_buy, us_buy,
                   macro, news, overseas, fear_greed, sector_flows,
                   external_events=None,
                   investor_summary=None,
-                  theme_picks=None) -> str:
+                  theme_picks=None,
+                  **kwargs) -> str:
     global _last_claude_structured
     try:
         import anthropic
@@ -1621,10 +1972,18 @@ def ask_claude_v4(kospi_buy, kosdaq_buy, us_buy,
             lines.append(f"[{theme}] {picks_str}")
         theme_txt = "국내테마 상위종목:\n" + "\n".join(lines) + "\n"
 
+    # 지정학 리스크 (GRI)
+    gri_txt = ""
+    if kwargs.get("gri") is not None and kwargs.get("recovery") is not None:
+        from geopolitical_risk_engine import format_gri_for_claude
+        gri_txt = format_gri_for_claude(
+            kwargs["gri"], kwargs["recovery"], kwargs.get("war_watchlist", [])
+        ) + "\n"
+
     def _build_prompt(kb, kqb, ub, ks, kqs, us):
         return f"""{datetime.datetime.now().strftime('%Y-%m-%d')} 주식 애널리스트 투자 의견 작성.
 
-{ext_txt}{inv_txt}{theme_txt}거시: {macro_txt}
+{ext_txt}{inv_txt}{theme_txt}{gri_txt}거시: {macro_txt}
 심리: {fg_txt}
 섹터5일: {sector_txt}
 해외: {ov_txt}
@@ -1695,8 +2054,9 @@ def ask_claude_v4(kospi_buy, kosdaq_buy, us_buy,
 
 반드시 분석 텍스트 맨 앞에 아래 JSON을 먼저 출력하라 (선별 기준으로 활용):
 ```json
-{{"top_buy":[{{"ticker":"티커","name":"종목명","grade":"★★★","target1":0,"target2":0,"stop":0}}],"top_sell":[{{"ticker":"티커","name":"종목명","stop":0}}],"market":"시장판단한줄","risk":"핵심리스크한줄","fg_signal":"매수|관망|매도"}}
+{{"top_buy":[{{"ticker":"티커","name":"종목명","grade":"★★★","target1":0,"target2":0,"stop":0}}],"top_sell":[{{"ticker":"티커","name":"종목명","stop":0}}],"market":"시장판단한줄","risk":"핵심리스크한줄","fg_signal":"매수|관망|매도","sentiment":{{"티커":점수}}}}
 ```
+sentiment 규칙: 위 매수/매도 후보 종목별로 오늘 뉴스가 해당 종목/섹터에 미치는 영향을 -2(매우부정)~+2(매우긍정) 정수로 평가. 직접 관련 뉴스 없으면 0. 섹터 전체에 영향주는 뉴스도 반영.
 JSON 출력 후 아래 상세 분석을 이어서 출력하라."""
 
     prompt = _build_prompt(kospi_buy, kosdaq_buy, us_buy, kospi_sell, kosdaq_sell, us_sell)
@@ -1734,7 +2094,8 @@ JSON 출력 후 아래 상세 분석을 이어서 출력하라."""
             pass
         return text_part
     except Exception as e:
-        return f"[Claude API 오류: {e}]"
+        print(f"  ⚠️ Claude API 오류: {e}")
+        return f"[Claude 분석 실패 — 기술적 분석만 포함] (사유: {e})"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1962,7 +2323,12 @@ def build_report(kospi_buy, kosdaq_buy, us_buy,
                  china_etf_picks: list = None,
                  ipo_buy: list = None,
                  reversal_picks: list = None,
-                 bearish_picks: list = None) -> str:
+                 trend_picks: list = None,
+                 bearish_picks: list = None,
+                 gri_summary: str = None,
+                 mdt_up_picks: list = None,
+                 mdt_dn_picks: list = None,
+                 corr_data: dict = None) -> str:
     now = datetime.datetime.now().strftime("%Y년 %m월 %d일 %H:%M")
     L   = []
 
@@ -1988,6 +2354,8 @@ def build_report(kospi_buy, kosdaq_buy, us_buy,
                  f", 점수보정:{_adj:+d}점){_wr_str}")
         for _r in macro_regime.get("reasons", []):
             L.append(f"    · {_r}")
+    if gri_summary:
+        L.append(gri_summary)
     L.append("=" * 80)
 
     # ── Claude 시장 총평 (헤더 바로 아래) ─────────────────────────
@@ -2021,6 +2389,13 @@ def build_report(kospi_buy, kosdaq_buy, us_buy,
                      f"ADX:{r['adx']:.0f}(+DI:{r['plus_di']:.0f}/-DI:{r['minus_di']:.0f})")
             L.append(f"       52주위치:{r['pos_52w']:.0f}% | 모멘텀:{r['mom5']:+.2f}% | "
                      f"거래량:{r['vol_ratio']:.1f}x | ATR:{r['atr_pct']:.1f}%")
+            # 추세 필터 상태
+            _lbr = "LBR:상승" if r.get("lbr_trending") else "LBR:비추세"
+            _wma = "주봉MA20:상승" if r.get("weekly_ma20_rising") else "주봉MA20:하락"
+            _geo = r.get("_geo_sector", "default")
+            _geo_adj = r.get("_geo_adj", 0)
+            _geo_str = f"섹터:{_geo}({_geo_adj:+d})" if _geo_adj != 0 else f"섹터:{_geo}"
+            L.append(f"       추세: {_lbr} | {_wma} | {_geo_str}")
             if fund:
                 fparts = []
                 if fund.get("pe"):       fparts.append(f"P/E:{fund['pe']}")
@@ -2029,6 +2404,23 @@ def build_report(kospi_buy, kosdaq_buy, us_buy,
                 if fund.get("sector"):  fparts.append(f"섹터:{fund['sector']}")
                 if fparts:
                     L.append(f"       펀더: {' | '.join(fparts)}")
+            # 뉴스 감성 점수 (Claude 분석 결과)
+            _sent = _last_claude_structured.get("sentiment", {})
+            _s = _sent.get(r["ticker"], _sent.get(r["ticker"].split(".")[0], None))
+            if _s is not None and _s != 0:
+                _si = {2:"🟢🟢", 1:"🟢", -1:"🔴", -2:"🔴🔴"}.get(int(_s), "⚪")
+                L.append(f"       뉴스감성: {_si}({_s:+d})")
+            # Feature Importance — 상위 기여 지표
+            _bd = r.get("score_breakdown", {})
+            if _bd:
+                _factors = [(k, v) for k, v in _bd.items()
+                            if k not in ("total", "regime") and v != 0]
+                _factors.sort(key=lambda x: abs(x[1]), reverse=True)
+                if _factors:
+                    _top = _factors[:3]
+                    _fi_str = " > ".join(f"{k}({v:+.0f})" for k, v in _top)
+                    _regime_tag = f"[{_bd.get('regime', '중립')}]" if _bd.get("regime", "중립") != "중립" else ""
+                    L.append(f"       🔍 핵심요인{_regime_tag}: {_fi_str}")
             # 매수/매도 근거·전략·리스크 (지표 기반, 항상 출력)
             for line in _auto_analysis(r, section):
                 L.append(line)
@@ -2041,21 +2433,74 @@ def build_report(kospi_buy, kosdaq_buy, us_buy,
     # 바닥 반전 시그널 — 기존 fmt_block 포맷 + 시그널 요약
     if reversal_picks:
         fmt_block(reversal_picks,
-                  "기술적 반전 매수 시그널 (RSI 반등 + MACD 골든크로스 + 거래량 동반)",
+                  "기술적 반전 매수 시그널 (RSI+MACD+거래량 / ADX하락반전) — 한국만",
                   "🔄", "buy")
         # 시그널 요약 추가
         L.append("")
-        L.append("  ※ 위 종목은 기존 매수추천과 별도 — 4가지 기술적 반전 조건 동시 충족:")
+        L.append("  ※ 위 종목은 기존 매수추천과 별도 — 경로A(RSI+MACD+거래량) 또는 경로B(ADX하락반전) 충족:")
         for i, r in enumerate(reversal_picks, 1):
             sig = r["reversal_signal"]
-            rsi_str = f"RSI:{sig['rsi_low']:.0f}→{sig['rsi_now']:.0f}"
-            if sig["macd_cross_days"] is not None:
-                macd_str = f"MACD {sig['macd_cross_days']}일전 GC"
-            elif sig["hist_latest"] >= 0:
-                macd_str = "히스토그램 양전환"
-            else:
-                macd_str = f"히스토그램 {sig['hist_shrink_days']}일 축소"
-            L.append(f"     {i:2d}. {r['name']:12s} {rsi_str} | {macd_str} | 거래량 {sig['vol_spike']:.1f}x")
+            parts = []
+            if sig.get("path_a"):
+                rsi_str = f"RSI:{sig['rsi_low']:.0f}→{sig['rsi_now']:.0f}"
+                if sig["macd_cross_days"] is not None:
+                    macd_str = f"MACD {sig['macd_cross_days']}일전 GC"
+                elif sig["hist_latest"] >= 0:
+                    macd_str = "히스토그램 양전환"
+                else:
+                    macd_str = f"히스토그램 {sig['hist_shrink_days']}일 축소"
+                parts.append(f"{rsi_str} | {macd_str} | 거래량 {sig['vol_spike']:.1f}x")
+            if sig.get("adx_reversal"):
+                parts.append(f"ADX하락반전(peak:{sig['adx_peak']:.0f}→now:{sig['adx_now']:.0f})")
+            L.append(f"     {i:2d}. {r['name']:12s} {' + '.join(parts)}")
+
+    # 추세 매수 시그널 — LBR 3/10 추세 + 주봉 20MA 우상향 동시 충족
+    if trend_picks:
+        fmt_block(trend_picks,
+                  "추세 매수 시그널 (LBR 3/10 상승추세 + 주봉 20MA 우상향)",
+                  "📈", "buy")
+        L.append("")
+        L.append("  ※ 위 종목은 기존 매수추천과 별도 — 2가지 추세 조건 동시 충족:")
+        L.append("     ① LBR 3/10: EMA(3)-EMA(10) > 0 AND SMA(16) 우상향 → 단기 추세 확립")
+        L.append("     ② 주봉 20MA: 최근 3주간 주봉 20주 이동평균 연속 상승 → 중기 추세 확인")
+        for i, r in enumerate(trend_picks, 1):
+            _lbr = f"LBR:{r['lbr_fast']:+.4f}"
+            _wma = "주봉MA20:상승"
+            _adx = f"ADX:{r['adx']:.0f}(+DI:{r['plus_di']:.0f}/-DI:{r['minus_di']:.0f})"
+            L.append(f"     {i:2d}. {r['name']:12s} 점수:{r['score']:+.1f} | {_lbr} | {_wma} | {_adx}")
+
+    # 2~3일 복합 추세 시그널 — 가격+RSI+MACD+거래량 방향 일치
+    if mdt_up_picks:
+        fmt_block(mdt_up_picks,
+                  "2~3일 상승 추세 형성 (가격↑ + RSI↑ + MACD↑ + 거래량 뒷받침)",
+                  "📊", "buy")
+        L.append("")
+        L.append("  ※ 최근 3일간 4개 조건 중 3개 이상 동시 충족 — 단기 노이즈가 아닌 추세 형성 확인:")
+        for i, r in enumerate(mdt_up_picks, 1):
+            t = r["multi_day_trend"]
+            parts = []
+            parts.append("가격↑" if t["price_trend"] else "가격-")
+            parts.append(f"RSI{'↑' if t['rsi_improving'] else '-'}({t['rsi_3d_ago']:.0f}→{t['rsi_now']:.0f})")
+            parts.append(f"MACD{'↑' if t['macd_improving'] else '-'}")
+            parts.append(f"거래량{'✓' if t['vol_confirmed'] else '✗'}")
+            strength = "★★" if t["strength"] == "strong" else "★"
+            L.append(f"     {i:2d}. {r['name']:12s} {strength} {' | '.join(parts)}")
+
+    if mdt_dn_picks:
+        fmt_block(mdt_dn_picks,
+                  "2~3일 하락 추세 형성 (가격↓ + RSI↓ + MACD↓ + 매도 거래량)",
+                  "📊", "sell")
+        L.append("")
+        L.append("  ※ 최근 3일간 4개 조건 중 3개 이상 동시 충족 — 하락 추세 형성 확인:")
+        for i, r in enumerate(mdt_dn_picks, 1):
+            t = r["multi_day_trend"]
+            parts = []
+            parts.append("가격↓" if t["price_trend"] else "가격-")
+            parts.append(f"RSI{'↓' if t['rsi_improving'] else '-'}({t['rsi_3d_ago']:.0f}→{t['rsi_now']:.0f})")
+            parts.append(f"MACD{'↓' if t['macd_improving'] else '-'}")
+            parts.append(f"매도거래량{'✓' if t['vol_confirmed'] else '✗'}")
+            strength = "★★" if t["strength"] == "strong" else "★"
+            L.append(f"     {i:2d}. {r['name']:12s} {strength} {' | '.join(parts)}")
 
     fmt_block(us_buy,     "미국 매수 TOP",   "🇺🇸", "buy")
     fmt_block(kospi_sell,  "코스피 매도 TOP", "🇰🇷", "sell")
@@ -2079,6 +2524,38 @@ def build_report(kospi_buy, kosdaq_buy, us_buy,
             else:
                 macd_str = f"히스토그램 {sig['hist_shrink_days']}일 축소"
             L.append(f"     {i:2d}. {r['name']:12s} {rsi_str} | {macd_str} | 상승일 거래량 {sig['vol_ratio_on_up']:.1f}x")
+
+    # 상관관계 분석 섹션
+    if corr_data:
+        L.append("\n" + "─" * 80)
+        L.append("  🔗 상관관계 분석 (종목 vs 벤치마크 30일 수익률)")
+        L.append("─" * 80)
+        L.append(f"  {'종목':12s} {'KOSPI':>7s} {'S&P500':>7s} {'USD/KRW':>8s} {'WTI':>6s}  디커플링")
+        L.append("  " + "─" * 65)
+        for ticker, info in corr_data.items():
+            c = info["corrs"]
+            name = info["name"][:10]
+            kospi = f"{c.get('KOSPI', '-'):>7}" if isinstance(c.get('KOSPI'), float) else f"{'—':>7}"
+            sp500 = f"{c.get('S&P500', '-'):>7}" if isinstance(c.get('S&P500'), float) else f"{'—':>7}"
+            usdkrw = f"{c.get('USD/KRW', '-'):>8}" if isinstance(c.get('USD/KRW'), float) else f"{'—':>8}"
+            wti = f"{c.get('WTI', '-'):>6}" if isinstance(c.get('WTI'), float) else f"{'—':>6}"
+            dec = " ⚠️ " + ", ".join(info["decoupling"]) if info.get("decoupling") else ""
+            L.append(f"  {name:12s} {kospi} {sp500} {usdkrw} {wti}{dec}")
+        # 뉴스 감성 요약
+        _sent = _last_claude_structured.get("sentiment", {})
+        if _sent:
+            pos = [(k, v) for k, v in _sent.items() if v > 0]
+            neg = [(k, v) for k, v in _sent.items() if v < 0]
+            if pos or neg:
+                L.append("\n" + "─" * 80)
+                L.append("  📰 뉴스 감성 분석 (Claude 평가)")
+                L.append("─" * 80)
+                if pos:
+                    pos_str = " / ".join(f"{k}({v:+d})" for k, v in sorted(pos, key=lambda x: -x[1]))
+                    L.append(f"  🟢 긍정: {pos_str}")
+                if neg:
+                    neg_str = " / ".join(f"{k}({v:+d})" for k, v in sorted(neg, key=lambda x: x[1]))
+                    L.append(f"  🔴 부정: {neg_str}")
 
     # 유명 투자자 포트폴리오 섹션
     if investor_summary:
@@ -2147,6 +2624,17 @@ def build_report(kospi_buy, kosdaq_buy, us_buy,
     if verification_section:
         L.append("")
         L.append(verification_section)
+
+    # 데이터 품질 섹션
+    try:
+        exc_count = data_cleaner.get_excluded_count()
+        if exc_count > 0:
+            L.append("")
+            L.append("─" * 60)
+            L.append(f"📊 데이터 품질: {exc_count}개 종목 제외 (이상치/결측/거래정지)")
+            L.append("   상세: logs/excluded_*.log 참조")
+    except Exception:
+        pass
 
     L.append("\n" + "=" * 80)
     L.append("  ⚠️  기술적·펀더멘털 분석 참고용 / 투자 손익 책임은 본인에게 있습니다.")
@@ -2239,7 +2727,11 @@ def build_html_report(kospi_buy, kosdaq_buy, us_buy,
                       kr_etf_picks: list = None,
                       china_etf_picks: list = None,
                       reversal_picks: list = None,
-                      bearish_picks: list = None) -> str:
+                      trend_picks: list = None,
+                      bearish_picks: list = None,
+                      mdt_up_picks: list = None,
+                      mdt_dn_picks: list = None,
+                 corr_data: dict = None) -> str:
     """HTML 이메일 본문 생성."""
     now = datetime.datetime.now().strftime("%Y년 %m월 %d일 %H:%M")
     fg = fear_greed or {}
@@ -2283,10 +2775,30 @@ def build_html_report(kospi_buy, kosdaq_buy, us_buy,
     # 바닥 반전 시그널 — 기존 stock table 포맷 사용
     if reversal_picks:
         sections.append(section(
-            "🔄 기술적 반전 매수 시그널 (RSI 반등 + MACD 골든크로스 + 거래량 동반)",
+            "🔄 기술적 반전 매수 시그널 (RSI+MACD+거래량 / ADX하락반전) — 한국만",
             "<p style='font-size:11px;color:#555'>기존 매수추천과 별도 — "
-            "4가지 기술적 반전 조건 동시 충족</p>"
+            "경로A(RSI+MACD+거래량) 또는 경로B(ADX하락반전) 충족</p>"
             + _html_stock_table(reversal_picks, "buy")))
+
+    # 추세 매수 시그널 — LBR + 주봉 20MA 동시 충족
+    if trend_picks:
+        sections.append(section(
+            "📈 추세 매수 시그널 (LBR 3/10 상승추세 + 주봉 20MA 우상향)",
+            "<p style='font-size:11px;color:#555'>기존 매수추천과 별도 — "
+            "LBR 3/10 상승추세 + 주봉 20주 이동평균 우상향 동시 충족</p>"
+            + _html_stock_table(trend_picks, "buy")))
+
+    # 2~3일 복합 추세 시그널
+    if mdt_up_picks:
+        sections.append(section(
+            "📊 2~3일 상승 추세 형성 (가격↑ + RSI↑ + MACD↑ + 거래량)",
+            "<p style='font-size:11px;color:#555'>최근 3일간 4개 조건 중 3개 이상 동시 충족</p>"
+            + _html_stock_table(mdt_up_picks, "buy")))
+    if mdt_dn_picks:
+        sections.append(section(
+            "📊 2~3일 하락 추세 형성 (가격↓ + RSI↓ + MACD↓ + 매도거래량)",
+            "<p style='font-size:11px;color:#555'>최근 3일간 4개 조건 중 3개 이상 동시 충족</p>"
+            + _html_stock_table(mdt_dn_picks, "sell")))
 
     sections += [
         section("🇺🇸 미국 매수 TOP",   _html_stock_table(us_buy, "buy")),
@@ -2395,7 +2907,7 @@ def send_email(report_text: str, html_report: str = ""):
     try:
         msg = MIMEText(report_text, "plain", "utf-8")
         msg["Subject"] = (
-            f"📊 AI 주식 v4 {datetime.datetime.now().strftime('%Y-%m-%d')} "
+            f"AI 주식 v4 {datetime.datetime.now().strftime('%Y-%m-%d')} "
             f"| 기술+펀더멘털+Fear&Greed"
         )
         msg["From"] = EMAIL_FROM
@@ -2601,12 +3113,65 @@ def main():
     for r in macro_regime["reasons"]:
         print(f"   · {r}")
 
-    if adj != 0:
-        for market in all_results:
-            for r in all_results[market]:
-                r["score"] = r["score"] + adj
-            all_results[market].sort(key=lambda x: x["score"], reverse=True)
-        print(f"   ✓ 전 종목 점수 {adj:+d}점 보정 완료")
+    # ③-c 지정학 리스크 인덱스 (GRI)
+    from geopolitical_risk_engine import (
+        compute_geopolitical_risk_index,
+        compute_crash_recovery_signal,
+        apply_sector_differential_adjustment,
+        get_war_beneficiary_watchlist,
+        format_gri_summary,
+        format_gri_for_claude,
+    )
+    gri = compute_geopolitical_risk_index(macro, sector_flows)
+    print(f"\n③-c 지정학 리스크: GRI {gri['gri_score']}/100 [{gri['gri_label']}]")
+    comps = gri.get("components", {})
+    comp_parts = []
+    for cn, cd in comps.items():
+        if cd.get("score", 0) > 0:
+            comp_parts.append(f"{cn}={cd['score']}")
+    if comp_parts:
+        print(f"   구성: {' | '.join(comp_parts)}")
+    adj_parts = [f"{k}:{v:+d}" for k, v in gri["sector_adjustments"].items()
+                 if k != "default" and v != 0]
+    if adj_parts:
+        print(f"   섹터보정: {' / '.join(adj_parts)}")
+
+    # ③-d 급락 반등 시그널
+    recovery = compute_crash_recovery_signal(macro, fear_greed)
+    if recovery["recovery_active"]:
+        print(f"   반등시그널: {recovery['signals_fired']} -> 전종목 +{recovery['recovery_adjustment']}점")
+    elif recovery["signals_fired"]:
+        print(f"   반등징후(약): {recovery['signals_fired']} (2개 미만, 보너스 미적용)")
+
+    # 섹터별 차등 보정 적용 (기존 균일 보정 대체)
+    apply_sector_differential_adjustment(all_results, gri, recovery, adj)
+    print(f"   ✓ 섹터별 차등 보정 완료 (기본:{adj:+d} + 섹터별 + 반등:{recovery.get('recovery_adjustment', 0):+d})")
+
+    # ③-d 국면별 가중치 적용 (레짐에 따라 지표 가중치 재계산)
+    _regime_name = macro_regime["regime"]
+    if _regime_name != "중립":
+        _rwc = apply_regime_weights(all_results, _regime_name)
+        if _rwc:
+            print(f"   ✓ 국면별 가중치 적용: {_regime_name} → {_rwc}개 종목 점수 재계산")
+            for mkt in all_results:
+                all_results[mkt].sort(key=lambda x: x["score"], reverse=True)
+
+    # 전쟁 수혜주 워치리스트 — high_escalation 시 +5 보너스
+    war_watchlist = get_war_beneficiary_watchlist(gri)
+    if war_watchlist:
+        war_tickers = {w["ticker"].split(".")[0].upper() for w in war_watchlist}
+        if gri["gri_label"] == "high_escalation":
+            war_boosted = 0
+            for mkt in all_results:
+                for r in all_results[mkt]:
+                    tk = r["ticker"].split(".")[0].upper()
+                    if tk in war_tickers:
+                        r["score"] += 5
+                        r["_war_bonus"] = 5
+                        war_boosted += 1
+            print(f"   전쟁 수혜주 워치리스트: {len(war_watchlist)}개 (high_escalation → {war_boosted}개 +5점)")
+        else:
+            print(f"   전쟁 수혜주 워치리스트: {len(war_watchlist)}개 (보너스 미적용: {gri['gri_label']})")
 
     # ④ 외부 변수 로드
     external_events = load_external_events()
@@ -2670,6 +3235,7 @@ def main():
         external_events=external_events,
         investor_summary=investor_summary,
         theme_picks=theme_picks,
+        gri=gri, recovery=recovery, war_watchlist=war_watchlist,
     )
 
     # ⑥ 최종 선별 — Claude 추천 종목에 보너스 반영 후 종합점수 순 정렬
@@ -2729,11 +3295,20 @@ def main():
     all_flat = []
     for mkt_list in all_results.values():
         all_flat.extend(mkt_list)
-    reversal_picks = [r for r in all_flat if r.get("reversal_signal")]
+    reversal_picks = [r for r in all_flat if r.get("reversal_signal") and r["market"] != "US"]
     reversal_picks.sort(key=lambda x: x["score"], reverse=True)
     reversal_picks = reversal_picks[:10]
     if reversal_picks:
         print(f"   🔄 바닥 반전(매수) 시그널: {len(reversal_picks)}개 탐지")
+
+    # 추세 매수 시그널: LBR 추세 + 주봉 20MA 우상향 동시 충족 종목
+    trend_picks = [r for r in all_flat
+                   if r.get("lbr_trending") and r.get("weekly_ma20_rising")
+                   and r["score"] > 0]
+    trend_picks.sort(key=lambda x: x["score"], reverse=True)
+    trend_picks = trend_picks[:10]
+    if trend_picks:
+        print(f"   📈 추세 매수 시그널 (LBR+주봉MA20): {len(trend_picks)}개 탐지")
 
     bearish_picks = [r for r in all_flat if r.get("bearish_signal")]
     bearish_picks.sort(key=lambda x: x["score"])  # 점수 낮은 순 (매도 우선)
@@ -2741,7 +3316,34 @@ def main():
     if bearish_picks:
         print(f"   📉 천장 반전(매도) 시그널: {len(bearish_picks)}개 탐지")
 
+    # 2~3일 복합 추세 시그널
+    mdt_up_picks = [r for r in all_flat
+                    if r.get("multi_day_trend") and r["multi_day_trend"]["direction"] == "up"]
+    mdt_up_picks.sort(key=lambda x: x["score"], reverse=True)
+    mdt_up_picks = mdt_up_picks[:10]
+    mdt_dn_picks = [r for r in all_flat
+                    if r.get("multi_day_trend") and r["multi_day_trend"]["direction"] == "down"]
+    mdt_dn_picks.sort(key=lambda x: x["score"])
+    mdt_dn_picks = mdt_dn_picks[:10]
+    if mdt_up_picks:
+        print(f"   📊 2~3일 상승 추세 형성: {len(mdt_up_picks)}개 탐지")
+    if mdt_dn_picks:
+        print(f"   📊 2~3일 하락 추세 형성: {len(mdt_dn_picks)}개 탐지")
+
+    # ⑥-c 상관관계 분석 (매수/매도 후보 vs 벤치마크)
+    print("   상관관계 분석 중...")
+    _corr_candidates = (kospi_buy + kosdaq_buy + us_buy +
+                        kospi_sell + kosdaq_sell + us_sell)[:20]
+    corr_data = {}
+    try:
+        corr_data = compute_correlations(_corr_candidates)
+        decoup_cnt = sum(1 for v in corr_data.values() if v.get("decoupling"))
+        print(f"   ✓ 상관관계 {len(corr_data)}개 종목 | 디커플링 {decoup_cnt}개 감지")
+    except Exception as e:
+        print(f"   ⚠️ 상관관계 분석 실패: {e}")
+
     # ⑥ 리포트 저장
+    _gri_summary = format_gri_summary(gri, recovery)
     report = build_report(
         kospi_buy, kosdaq_buy, us_buy,
         kospi_sell, kosdaq_sell, us_sell,
@@ -2754,7 +3356,12 @@ def main():
         china_etf_picks=china_etf_picks,
         ipo_buy=ipo_buy,
         reversal_picks=reversal_picks,
+        trend_picks=trend_picks,
         bearish_picks=bearish_picks,
+        gri_summary=_gri_summary,
+        mdt_up_picks=mdt_up_picks,
+        mdt_dn_picks=mdt_dn_picks,
+        corr_data=corr_data,
     )
     with open(REPORT_PATH, "w", encoding="utf-8") as f:
         f.write(report)
@@ -2801,7 +3408,12 @@ def main():
                 china_etf_picks=china_etf_picks,
                 ipo_buy=ipo_buy,
                 reversal_picks=reversal_picks,
+                trend_picks=trend_picks,
                 bearish_picks=bearish_picks,
+                gri_summary=_gri_summary,
+                mdt_up_picks=mdt_up_picks,
+                mdt_dn_picks=mdt_dn_picks,
+                corr_data=corr_data,
             )
             with open(REPORT_PATH, "w", encoding="utf-8") as f:
                 f.write(updated_report)
@@ -2821,7 +3433,10 @@ def main():
         kr_etf_picks=kr_etf_picks,
         china_etf_picks=china_etf_picks,
         reversal_picks=reversal_picks,
+        trend_picks=trend_picks,
         bearish_picks=bearish_picks,
+        mdt_up_picks=mdt_up_picks,
+        mdt_dn_picks=mdt_dn_picks,
     )
     html_path = os.path.join(BASE_DIR, "report_v4.html")
     with open(html_path, "w", encoding="utf-8") as f:

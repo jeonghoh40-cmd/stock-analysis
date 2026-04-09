@@ -128,20 +128,50 @@ def clean(df: pd.DataFrame, ticker: str) -> 'pd.DataFrame | None':
     # 보간 후에도 남은 결측치(앞/뒤 경계) forward/backward fill
     result[ohlcv_cols] = result[ohlcv_cols].ffill().bfill()
 
-    # ── 4. 종가 이상치 검사 (전일 대비 ±30% 초과) ───────────────────────
+    # ── 4. 종가 이상치 검사 ────────────────────────────────────────────
+    # 한국 시장(KS/KQ)은 가격제한폭 ±30%이므로 임계값 35%로 완화
+    # 이상치 3건 이하: 해당 행만 제거 (종목 유지)
+    # 이상치 4건+: 종목 전체 제외
     if 'Close' in result.columns:
+        is_kr = ticker.endswith('.KS') or ticker.endswith('.KQ')
+        outlier_threshold = 0.35 if is_kr else 0.30
         close = result['Close']
-        pct_change = close.pct_change().abs()
-        outlier_mask = pct_change > 0.30
+        pct_change = close.pct_change()
+        abs_change = pct_change.abs()
+        outlier_mask = abs_change > outlier_threshold
+
+        # 주식분할/병합 오탐 방지: 큰 변동 후 다음날 역방향 20%+ 회복이면 분할로 간주
+        if outlier_mask.any():
+            outlier_indices = outlier_mask[outlier_mask].index.tolist()
+            false_positives = set()
+            for idx in outlier_indices:
+                pos = result.index.get_loc(idx)
+                if pos + 1 < len(result):
+                    next_chg = pct_change.iloc[pos + 1] if pos + 1 < len(pct_change) else 0
+                    curr_chg = pct_change.iloc[pos] if pos < len(pct_change) else 0
+                    # 역방향 회복: 부호 반대 + 20% 이상 되돌림
+                    if curr_chg != 0 and next_chg != 0:
+                        if (curr_chg > 0 and next_chg < -0.20) or (curr_chg < 0 and next_chg > 0.20):
+                            false_positives.add(idx)
+            # 분할 의심 건 제외
+            outlier_mask.loc[list(false_positives)] = False
 
         if outlier_mask.any():
             outlier_count = int(outlier_mask.sum())
-            _log_excluded(
-                ticker,
-                f'종가 이상치 {outlier_count}건 (전일 대비 ±30% 초과)'
-            )
-            _excluded_count += 1
-            return None
+            if outlier_count <= 3:
+                # 소수 이상치: 해당 행만 제거하고 종목은 유지
+                result = result[~outlier_mask]
+                _log_excluded(
+                    ticker,
+                    f'종가 이상치 {outlier_count}건 제거 (행 삭제, 종목 유지)'
+                )
+            else:
+                _log_excluded(
+                    ticker,
+                    f'종가 이상치 {outlier_count}건 (전일 대비 ±{int(outlier_threshold*100)}% 초과)'
+                )
+                _excluded_count += 1
+                return None
 
     # ── 5. 최종 길이 재검사 ───────────────────────────────────────────────
     if len(result) < 65:

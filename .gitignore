@@ -15,6 +15,7 @@ stock_data_*.csv
 dart_financial_*.csv
 report.txt
 analysis.log
+logs/
 
 # 구버전 파일
 stock_analysis.py

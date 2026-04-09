@@ -269,7 +269,9 @@ def get_investor_score(ticker: str) -> dict:
             pelosi_score = 15           # 라이브 API: 의회 공시 실제 매수 = 최고 점수
         else:
             w = PELOSI_PORTFOLIO.get(clean, {}).get("weight", 0)
-            pelosi_score = int(min(15, w // 7 + 1) * _STATIC_DISCOUNT)
+            # weight 기반 점수: weight 10+ → 15, 5~9 → 10, 1~4 → 5
+            raw = 15 if w >= 10 else (10 if w >= 5 else 5)
+            pelosi_score = int(raw * _STATIC_DISCOUNT)
         investor_notes.append(
             f"Pelosi 매수: {PELOSI_PORTFOLIO.get(clean, {}).get('note', clean)}"
         )
