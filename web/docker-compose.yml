@@ -1,0 +1,22 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    volumes:
+      # 업로드된 IR 파일 (PC 업로드 모드)
+      - uploads:/data/uploads
+      # 생성된 리포트 (PC 다운로드 모드)
+      - reports:/data/reports
+      # (선택) 사내 네트워크 공유 폴더 마운트 — 환경에 맞게 수정
+      # - //fileserver/share:/mnt/network:ro
+    restart: unless-stopped
+
+volumes:
+  uploads:
+  reports:
