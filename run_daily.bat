@@ -10,7 +10,7 @@ REM ─────────────────────────�
 chcp 65001 > nul
 set PYTHONPATH=%~dp0
 set "SCRIPT_DIR=%~dp0"
-set "PYTHON=C:\Program Files\PostgreSQL\17\pgAdmin 4\python\python.exe"
+set "PYTHON=C:\Python314\python.exe"
 
 REM ── 날짜 포맷 (YYYYMMDD) ──────────────────────────────────────
 for /f "tokens=1-3 delims=-" %%a in ('powershell -NoProfile -Command "Get-Date -Format yyyy-MM-dd"') do (
@@ -35,11 +35,11 @@ if %ERRORLEVEL% NEQ 0 (
 
 REM ── ① ARK 라이브 데이터 강제 갱신 ──────────────────────────
 echo [%TIME%] Step 1b: ARK/Pelosi 라이브 캐시 갱신... >> "%LOG%"
-"%PYTHON%" -c "import sys; sys.path.insert(0, r'%SCRIPT_DIR%'); from investor_scorer import refresh_live_data; refresh_live_data()" >> "%LOG%" 2>&1
+"%PYTHON%" -c "from investor_scorer import refresh_live_data; refresh_live_data()" >> "%LOG%" 2>&1
 
 REM ── ② 주식 분석 v4 실행 ──────────────────────────────────────
 echo [%TIME%] Step 2: stock_advisor_v4 분석 시작... >> "%LOG%"
-"%PYTHON%" -c "import sys; sys.path.insert(0, r'%SCRIPT_DIR%'); import stock_advisor_v4; stock_advisor_v4.main()" >> "%LOG%" 2>&1
+"%PYTHON%" -c "import stock_advisor_v4; stock_advisor_v4.main()" >> "%LOG%" 2>&1
 
 if %ERRORLEVEL% EQU 0 (
     echo [%TIME%] 완료 — report_v4.txt 생성됨 >> "%LOG%"

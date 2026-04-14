@@ -1,39 +1,23 @@
 @echo off
 REM ──────────────────────────────────────────────────────────────
-REM  Task Scheduler 등록 스크립트 (관리자 권한으로 실행 필요)
-REM  사용법: 이 파일을 우클릭 → "관리자 권한으로 실행"
+REM  Task Scheduler 등록 스크립트
+REM  ★ 이 파일을 더블클릭하면 자동으로 관리자 권한 요청합니다 ★
 REM ──────────────────────────────────────────────────────────────
-
 chcp 65001 > nul
 
-set "SCRIPT_DIR=%~dp0"
-set "BAT_FILE=%SCRIPT_DIR%run_screening.bat"
-set "TASK_NAME=AI주식스크리닝"
-
-echo [1/2] 기존 작업 삭제 (없으면 무시)...
-schtasks /delete /tn "%TASK_NAME%" /f 2>nul
-
-echo [2/2] 매일 06:30 실행 작업 등록...
-schtasks /create ^
-  /tn "%TASK_NAME%" ^
-  /tr "%BAT_FILE%" ^
-  /sc DAILY ^
-  /st 06:30 ^
-  /ru "%USERNAME%" ^
-  /f ^
-  /rl HIGHEST
-
-if %ERRORLEVEL% EQU 0 (
-    echo.
-    echo ✅ 작업 등록 성공!
-    echo    작업명 : %TASK_NAME%
-    echo    실행파일: %BAT_FILE%
-    echo    일정   : 매일 06:30
-    echo.
-    echo 확인 방법: 작업 스케줄러 열기 → "작업 스케줄러 라이브러리" 확인
-    echo           또는: schtasks /query /tn "%TASK_NAME%"
-) else (
-    echo.
-    echo ❌ 등록 실패. 관리자 권한으로 다시 실행해 주세요.
+REM 관리자 권한 자동 요청
+net session >nul 2>&1
+if %ERRORLEVEL% NEQ 0 (
+    echo 관리자 권한이 필요합니다. UAC 창이 열립니다...
+    powershell -Command "Start-Process cmd -ArgumentList '/c cd /d ""%~dp0"" && ""%~f0""' -Verb RunAs"
+    exit /b
 )
+
+echo.
+echo [AI 주식 스크리닝] Task Scheduler 등록 중...
+echo.
+
+powershell -ExecutionPolicy Bypass -File "%~dp0register_task.ps1"
+
+echo.
 pause
