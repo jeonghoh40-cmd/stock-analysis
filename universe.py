@@ -27,8 +27,8 @@ logger = logging.getLogger(__name__)
 _KR_INDEX_CACHE_TTL_SEC  = 24 * 3600  # KOSPI/KOSDAQ 지수 구성종목 24시간 캐시
 _SP500_CACHE_TTL_SEC     =  6 * 3600  # S&P500 시총 상위 6시간 캐시
 
-KOSPI200_INDEX_CODE  = "KOSPI"   # FinanceDataReader — 시총 상위 200개 사용
-KOSDAQ150_INDEX_CODE = "KOSDAQ"  # FinanceDataReader — 시총 상위 150개 사용
+KOSPI200_INDEX_CODE  = "KOSPI"   # FinanceDataReader — 시총 상위 300개 사용 (200+ 유효 확보 목적)
+KOSDAQ150_INDEX_CODE = "KOSDAQ"  # FinanceDataReader — 시총 상위 300개 사용 (200+ 유효 확보 목적)
 
 _kospi200_cache:  Optional[tuple] = None  # (cached_at, {name: ticker})
 _kosdaq150_cache: Optional[tuple] = None
@@ -189,7 +189,7 @@ UNIVERSE: dict = {
 # 2. KOSPI 200 / KOSDAQ 150 동적 편입 (FinanceDataReader)
 # ═══════════════════════════════════════════════════════════════════
 
-_FDR_TOP_N = {"KOSPI": 200, "KOSDAQ": 150}
+_FDR_TOP_N = {"KOSPI": 300, "KOSDAQ": 300}
 
 def _fetch_kr_index(index_code: str, suffix: str) -> dict:
     """

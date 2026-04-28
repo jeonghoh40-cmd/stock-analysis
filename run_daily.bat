@@ -7,7 +7,7 @@ REM    ② stock_advisor_v4.py — 기술+펀더멘털+Fear&Greed 종합 분석
 REM  로그: logs\daily_YYYYMMDD.log
 REM ──────────────────────────────────────────────────────────────
 
-chcp 65001 > nul
+chcp 65001 > nul 2>&1 || rem
 set PYTHONPATH=%~dp0
 set "SCRIPT_DIR=%~dp0"
 set "PYTHON=C:\Python314\python.exe"

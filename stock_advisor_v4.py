@@ -21,6 +21,7 @@ v3 대비 추가 분석 방법론:
 
 import os
 import sys
+import time
 import json
 import smtplib
 import requests
@@ -981,14 +982,70 @@ def compute_macro_regime(macro: dict, fear_greed: dict, sector_flows: dict) -> d
 # ═══════════════════════════════════════════════════════════════
 # 단일 종목 고속 스크리닝 (신규 지표 포함)
 # ═══════════════════════════════════════════════════════════════
-# Lock → Semaphore: 최대 8개 병렬 다운로드 허용 (기존 Lock은 사실상 순차 실행)
-_YF_SEM = threading.Semaphore(8)
+_last_pool_sizes: dict = {}  # run_screening이 설정 → 리포트에서 "유효/풀" 표시용
+_kr_prefetch:    dict = {}  # {ticker: DataFrame} — 국내주 일괄 사전다운로드 결과
+
+# US 개별 호출용 세마포어 (KR 종목은 batch download로 대체)
+_YF_SEM = threading.Semaphore(6)
+
+
+def _prefetch_kr_data(tickers: list, chunk_size: int = 150) -> dict:
+    """
+    Korean stocks (KOSPI + KOSDAQ) 전종목을 청크별 yf.download()로 일괄 수집.
+    개별 Ticker.history() 대신 사용해 Yahoo Finance 레이트리밋을 원천 방지.
+    반환: {ticker: DataFrame(OHLCV)}  — 65거래일 미만이거나 빈 경우 제외.
+    """
+    result: dict = {}
+    chunks = [tickers[i:i + chunk_size] for i in range(0, len(tickers), chunk_size)]
+
+    for idx, chunk in enumerate(chunks, 1):
+        print(f"    KR 일괄 다운로드 {idx}/{len(chunks)} ({len(chunk)}개)...")
+        try:
+            raw = yf.download(
+                " ".join(chunk),
+                period="1y",
+                auto_adjust=False,
+                group_by="ticker",
+                progress=False,
+                timeout=60,
+                threads=True,
+            )
+            if raw is None or raw.empty:
+                continue
+
+            for t in chunk:
+                try:
+                    df = raw[t] if len(chunk) > 1 else raw
+                    if df is None or df.empty:
+                        continue
+                    df = df.dropna(how="all")
+                    if len(df) >= 65:
+                        result[t] = df
+                except (KeyError, TypeError):
+                    pass
+        except Exception as e:
+            print(f"    ⚠️ chunk {idx} 다운로드 실패: {e}")
+
+    return result
 
 def screen_one(market: str, name: str, ticker: str) -> Optional[dict]:
     try:
-        with _YF_SEM:
-            tk_obj = yf.Ticker(ticker)
-            df = tk_obj.history(period="1y", auto_adjust=False, timeout=10)
+        is_kr = ticker.endswith(".KS") or ticker.endswith(".KQ")
+        df = None
+
+        if is_kr and ticker in _kr_prefetch:
+            # 일괄 사전다운로드 결과 사용 (레이트리밋 없음)
+            df = _kr_prefetch[ticker].copy()
+        else:
+            # US 주식 또는 prefetch 누락 종목: 개별 요청 (재시도 1회)
+            for attempt in range(2 if is_kr else 1):
+                with _YF_SEM:
+                    df = yf.Ticker(ticker).history(period="1y", auto_adjust=False, timeout=15)
+                if df is not None and not df.empty and len(df) >= 65:
+                    break
+                if attempt == 0 and is_kr:
+                    time.sleep(1.5)
+
         if df is None or df.empty or len(df) < 65:
             return None
         # 12개월 요청에서 130 거래일 미만 → 약 6개월 이내 상장 추정
@@ -1364,12 +1421,21 @@ def run_screening() -> dict:
         if t not in existing_us:
             us_pool[n] = t
 
+    # ── 국내주 일괄 사전 다운로드 (yf.download batch → 레이트리밋 원천 방지) ──
+    all_kr_tickers = list(kospi_pool.values()) + list(kosdaq_pool.values())
+    print(f"\n  📥 국내주 일괄 사전 다운로드 ({len(all_kr_tickers)}개)...")
+    global _kr_prefetch
+    _kr_prefetch = _prefetch_kr_data(all_kr_tickers)
+    print(f"    ✓ 사전 다운로드 완료: {len(_kr_prefetch)}/{len(all_kr_tickers)}개 성공")
+
+    pool_sizes: dict = {}
     for market, pool, workers in [
-        ("KOSPI",  kospi_pool,  8),
-        ("KOSDAQ", kosdaq_pool, 6),
-        ("US",     us_pool,     8),
+        ("KOSPI",  kospi_pool,  5),
+        ("KOSDAQ", kosdaq_pool, 4),
+        ("US",     us_pool,     6),
     ]:
-        print(f"  스크리닝: {market} ({len(pool)}개)...")
+        pool_sizes[market] = len(pool)
+        print(f"  스크리닝: {market} ({len(pool)}개, {workers}스레드)...")
         tasks = [(market, n, t) for n, t in pool.items()]
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futs = {ex.submit(screen_one, m, n, t): (m, n, t) for m, n, t in tasks}
@@ -1378,7 +1444,9 @@ def run_screening() -> dict:
                 if r:
                     results[market].append(r)
         results[market].sort(key=lambda x: x["score"], reverse=True)
-        print(f"    ✓ {market} 유효 {len(results[market])}개")
+        valid = len(results[market])
+        rate = valid / pool_sizes[market] * 100 if pool_sizes[market] else 0
+        print(f"    ✓ {market} 유효 {valid}/{pool_sizes[market]}개 ({rate:.0f}%)")
 
     excluded = data_cleaner.get_excluded_count()
     if excluded:
@@ -1450,6 +1518,8 @@ def run_screening() -> dict:
     if results["IPO"]:
         print(f"    ✓ IPO (최근 6개월 신규상장) {len(results['IPO'])}개 탐지")
 
+    global _last_pool_sizes
+    _last_pool_sizes = pool_sizes
     return results
 
 
@@ -2336,7 +2406,11 @@ def build_report(kospi_buy, kosdaq_buy, us_buy,
     L.append("=" * 80)
     L.append(f"  📊 AI 주식 스크리닝 v4 (정밀 분석판)  |  {now}")
     _ipo_cnt = len(ipo_buy) if ipo_buy else 0
-    L.append(f"  스캔: 코스피 {total.get('KOSPI',0)}개 | 코스닥 {total.get('KOSDAQ',0)}개 | 미국 {total.get('US',0)}개 | IPO {total.get('IPO',0)}개")
+    def _scan_str(mkt):
+        valid = total.get(mkt, 0)
+        pool  = total.get(f"{mkt}_pool", 0)
+        return f"{valid}/{pool}개" if pool else f"{valid}개"
+    L.append(f"  스캔: 코스피 {_scan_str('KOSPI')} | 코스닥 {_scan_str('KOSDAQ')} | 미국 {_scan_str('US')} | IPO {total.get('IPO',0)}개")
     fg = fear_greed
     if fg:
         L.append(f"  Fear&Greed: {fg['지수']}/100 [{fg['단계']}] → {fg['해석']}")
@@ -2877,8 +2951,10 @@ def build_html_report(kospi_buy, kosdaq_buy, us_buy,
                                  f"<div class='perf-box'><pre style='margin:0;font-size:11px'>{perf_esc}</pre></div>"))
 
     body = "".join(sections)
-    scan_info = (f"스캔: 코스피 {total.get('KOSPI',0)}개 | "
-                 f"코스닥 {total.get('KOSDAQ',0)}개 | 미국 {total.get('US',0)}개")
+    def _s(mkt):
+        v = total.get(mkt, 0); p = total.get(f"{mkt}_pool", 0)
+        return f"{v}/{p}개" if p else f"{v}개"
+    scan_info = f"스캔: 코스피 {_s('KOSPI')} | 코스닥 {_s('KOSDAQ')} | 미국 {_s('US')}"
 
     return f"""<!DOCTYPE html>
 <html lang="ko"><head><meta charset="utf-8">
@@ -3344,10 +3420,12 @@ def main():
 
     # ⑥ 리포트 저장
     _gri_summary = format_gri_summary(gri, recovery)
+    _total_dict = {**{k: len(v) for k, v in all_results.items()},
+                   **{f"{k}_pool": v for k, v in _last_pool_sizes.items()}}
     report = build_report(
         kospi_buy, kosdaq_buy, us_buy,
         kospi_sell, kosdaq_sell, us_sell,
-        {k: len(v) for k, v in all_results.items()},
+        _total_dict,
         fear_greed, claude_opinion,
         investor_summary=investor_summary,
         theme_picks=theme_picks,
@@ -3398,7 +3476,7 @@ def main():
             updated_report = build_report(
                 kospi_buy, kosdaq_buy, us_buy,
                 kospi_sell, kosdaq_sell, us_sell,
-                {k: len(v) for k, v in all_results.items()},
+                _total_dict,
                 fear_greed, claude_opinion,
                 investor_summary=investor_summary,
                 theme_picks=theme_picks,
