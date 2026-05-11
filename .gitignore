@@ -68,3 +68,6 @@ Ark/
 # DB 파일
 stock_history.db
 stock_performance.db
+
+# 로컬 전용 스크립트
+run_daily.ps1
